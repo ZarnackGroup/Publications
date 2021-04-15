@@ -17,3 +17,4 @@ in the following link: [https://github.com/ZarnackGroup/m6Aboost](https://github
 could be found at [https://github.com/Codezy99/cliProfiler](https://github.com/Codezy99/cliProfiler)
 
 ## Reference
+Körtel, Nadine#, Cornelia Rückle#, You Zhou#, Anke Busch, Peter Hoch-Kraft, FX Reymond Sutandy, Jacob Haase, et al. 2021. “Deep and accurate detection of m6A RNA modifications using miCLIP2 and m6Aboost machine learning.” bioRxiv. https://doi.org/10.1101/2020.12.20.423675.
