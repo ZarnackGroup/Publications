@@ -1,2 +1,2 @@
 # Publications
-here collects the source codes for different publications in Zarnack's lab.
+Here collects the source codes for different publications in Zarnack's lab.
