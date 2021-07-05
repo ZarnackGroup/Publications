@@ -17,4 +17,4 @@ at https://bioconductor.org/packages/devel/bioc/html/m6Aboost.html
 can be found at https://github.com/Codezy99/cliProfiler
 
 ## Reference
-[1] Körtel, Nadine#, Cornelia Rücklé#, You Zhou#, Anke Busch, Peter Hoch-Kraft, FX Reymond Sutandy, Jacob Haase, et al. 2021. “Deep and accurate detection of m6A RNA modifications using miCLIP2 and m6Aboost machine learning.” bioRxiv. https://doi.org/10.1101/2020.12.20.423675.
+[1] Körtel, Nadine#, Cornelia Rücklé#, You Zhou#, Anke Busch, Peter Hoch-Kraft, FX Reymond Sutandy, Jacob Haase, et al. 2021. “Deep and accurate detection of m6A RNA modifications using miCLIP2 and m6Aboost machine learning.” Nuclear Acid Research (2021). https://doi.org/10.1093/nar/gkab485.
