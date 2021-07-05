@@ -12,7 +12,7 @@ The source code of "Deep and accurate detection of m6A RNA modifications using m
 at https://github.com/Codezy99/miCLIP2-DMA-source-code
 * For running the m6Aboost model to predict m6A sites from miCLIP2 data, 
 we made a package `m6Aboost` which can be found 
-at https://github.com/ZarnackGroup/m6Aboost
+at https://bioconductor.org/packages/devel/bioc/html/m6Aboost.html
 * The transcript metaprofiles were generated with the package `cliProfiler` which 
 can be found at https://github.com/Codezy99/cliProfiler
 
