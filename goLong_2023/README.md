@@ -1,6 +1,5 @@
 # GoLong_2023
 
----
 This repository holds all R-scripts and Rmarkdown reports of the GoLong_2023 publication. 
 
 ## 1 SF3B1 splicing analysis post processing
