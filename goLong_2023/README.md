@@ -9,29 +9,13 @@ Alternative splicing plays a critical role in generating transcriptome diversity
 The source code is split into three parts:
 
 * The [analysis of the isoseq data](https://github.com/ZarnackGroup/go_long2023/tree/main/1%20Isoseq%20Analysis) ; Figures 1-4
-* The *analysis of the iCLIP data*; Figure 5
-* The *integration of isoseq and iCLIP data*; Figure 6
+* The [analysis of the iCLIP data](https://github.com/ZarnackGroup/go_long2023/tree/main/2%20Binding%20Site%20Analysis); Figure 5
+* The [integration of isoseq and iCLIP data](https://github.com/ZarnackGroup/go_long2023/tree/main/3%20Integration%20Analysis); Figure 6
 
 ## Tools and packages
 
-The 
+* The isoseq analysis for long read transcriptome sequencing was performed with the *IsoTools python module*([GitHub](https://github.com/MatthiasLienhard/isotools))
+* The iCLIP analysis was performed with the *BindingSiteFinder* R package ([GitHub](https://github.com/ZarnackGroup/BindingSiteFinder), [Bioconductor](https://www.bioconductor.org/packages/release/bioc/html/BindingSiteFinder.html)).
 
 ## Reference
 TBA
-
-This repository holds all R-scripts and Rmarkdown reports of the GoLong_2023 publication. 
-
-## 1 Analysis of isoseq data
-* Notebooks for the individual stages of isoseq data analysis with IsoTools. 
-* Relates to Figures 1-4
-
-
-## 2 SF3B1 splicing analysis post processing
-
-* Combines the iCLIP crosslink signal and IsoSeq splicing results to generate splicing meta maps.
-* Relates to Figure 5 A-C.
-
-## 3 SF3B1 splicing regulation analysis
-
-* Analysis of canonical and putative alternative 3' splice site properties.
-* Reates to Figure 5 D-F
