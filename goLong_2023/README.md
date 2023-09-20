@@ -14,7 +14,7 @@ The source code is split into three parts:
 
 ## Tools and packages
 
-* The isoseq analysis for long read transcriptome sequencing was performed with the *IsoTools python module*([GitHub](https://github.com/MatthiasLienhard/isotools))
+* The isoseq analysis for long read transcriptome sequencing was performed with the *IsoTools python module* ([GitHub](https://github.com/MatthiasLienhard/isotools))
 * The iCLIP analysis was performed with the *BindingSiteFinder* R package ([GitHub](https://github.com/ZarnackGroup/BindingSiteFinder), [Bioconductor](https://www.bioconductor.org/packages/release/bioc/html/BindingSiteFinder.html)).
 
 ## Reference
