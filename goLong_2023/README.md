@@ -6,7 +6,7 @@ Alternative splicing plays a critical role in generating transcriptome diversity
 
 ## Source code
 
-The source code is split into three parts:
+The source code can be found [here](https://github.com/ZarnackGroup/go_long2023/tree/main) and is split into three parts:
 
 * The [analysis of the isoseq data](https://github.com/ZarnackGroup/go_long2023/tree/main/1%20Isoseq%20Analysis) ; Figures 1-4
 * The [analysis of the iCLIP data](https://github.com/ZarnackGroup/go_long2023/tree/main/2%20Binding%20Site%20Analysis); Figure 5
