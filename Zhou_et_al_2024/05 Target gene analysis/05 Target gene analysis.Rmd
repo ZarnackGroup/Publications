@@ -1,0 +1,1413 @@
+---
+title: "05 Target gene and p-body analysis"
+author: "You Zhou"
+date: "`r format(Sys.time(), '%B %e, %Y')`"
+output:
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: no
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    toc_collapsed: yes
+    fig_width: 8 
+    fig_height: 4 
+  bookdown::pdf_document2:
+    keep_tex: yes
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+graphics: yes
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+geometry: margin=1in
+fontsize: 18pt
+---
+
+```{r knitr off, echo=FALSE, message=FALSE,cache=FALSE, results="hide", render=FALSE ,warning=FALSE}
+knitr::opts_chunk$set(echo=F, error=FALSE, warning=FALSE,message=FALSE,
+                      crop=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(xlsx)
+library(keras)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(tidyverse)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(adabag)
+library(rtracklayer)
+library(Rsamtools)
+library(ranger)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+linesize <- 1
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black"),
+      axis.ticks.y = element_line(color = "black")))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+```
+
+# Introduction
+
+This report collects the code for find out the characteristic of genes which up regulated with 
+different treatments.
+
+------------------------------------------------------------------------
+
+# Identifying target gene groups
+
+In this section, we will identify the genes which strongly up regulated upon different treatment as 
+the targets for the corresponding treatment.
+
+```{r}
+## filtering parameteres
+pvalue <- 0.05
+basemean <- 10
+## data loading
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+## load DA result
+da_stm_6h <- read_Anke_DA(paste0(path.to.data, "sR18_STM.vs.sR18_DMSO.csv")) %>% 
+  filter(baseMean >= basemean) %>% 
+  dplyr::select(., 1:9) %>%
+  mutate(time = "6h") 
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv")) %>% 
+    filter(baseMean >= basemean)  %>% dplyr::select(., 1:9) %>%
+    mutate(time = "9h")
+da_stm_24h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_24h_STM2457.vs.HEK293T_24h_DMSO.csv")) %>%
+    filter(baseMean >= basemean)  %>% dplyr::select(., 1:9) %>%
+    mutate(time = "24h")
+da_ythdf2 <-
+    read_Anke_DA(paste0(path.to.data, "YTHDF2_KD_DMSO.vs.sR18_DMSO.csv")) %>% 
+    filter(baseMean >= basemean) 
+
+## load m6A
+m6A_hek_GLORI <- readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+
+## calculate the m6A number and the assignment for padj and log2 fold change
+number_glori <- as.data.frame(m6A_hek_GLORI) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop")
+number_glori$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(number_glori$Gene_ID, da_stm_6h$gene_id)
+]
+number_glori$padj_stm6h <- da_stm_6h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_6h$gene_id)
+]
+number_glori$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(number_glori$Gene_ID, da_stm_9h$gene_id)
+]
+number_glori$padj_stm9h <- da_stm_9h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_9h$gene_id)
+]
+number_glori$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(number_glori$Gene_ID, da_stm_24h$gene_id)
+]
+number_glori$padj_stm24h <- da_stm_24h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_24h$gene_id)
+]
+number_glori$log2FC_ythdf2 <- da_ythdf2$log2FC[
+    match(number_glori$Gene_ID, da_ythdf2$gene_id)
+]
+number_glori$padj_ythdf2 <- da_ythdf2$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_ythdf2$gene_id)
+]
+```
+
+```{r}
+## calculate LFC for DCP2 KD and CNOT1 KD
+# DCP2
+## load data
+df_sample <- readxl::read_xlsx("~/Desktop/Data/GEO/DCP2_HEK/sample_name.xlsx")
+df_sample %>% as.data.frame(.)
+
+df_count <- read.table("~/Desktop/Data/GEO/DCP2_HEK/count_dcp2.txt",
+                       header = T)[,c(1, 7:12)]
+rownames(df_count) <- df_count$Geneid
+df_count$Geneid <- NULL
+
+## rename the column
+colnames(df_count) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(df_count))
+colnames(df_count) <- gsub(".bam", "", colnames(df_count))
+
+colnames(df_count) <- df_sample$sample[match(colnames(df_count), df_sample$SRR)]
+df_dcp2 <- df_count[, c(1:4)]
+condition_deseq <- data.frame(condition = rep(c("WT", "DCP2"), each = 2),
+                              rep = c(rep(c("1", "2"), 2)))
+dds_dcp2 <- DESeqDataSetFromMatrix(countData = df_dcp2,
+                              colData = condition_deseq,
+                              design = ~ condition)
+keep <- rowSums(counts(dds_dcp2)) >= 1
+dds_dcp2 <- dds_dcp2[keep,]
+dds_dcp2 <- DESeq(dds_dcp2)
+
+## get DCP2 DA result
+res.dcp2 <- results(dds_dcp2, contrast = c("condition", "DCP2", "WT")) %>%
+    as.data.frame() %>% filter(baseMean >= basemean)
+res.dcp2$gene_id <- substr(rownames(res.dcp2), 1, 15)
+
+## CNOT1
+df.cnot <- 
+    read.csv("~/Desktop/Data/GEO/CNOT1 KD/gene_count_matrix.csv")[,c(1,6,7,10,11)]
+rownames(df.cnot) <- df.cnot$gene_id
+df.cnot$gene_id <- NULL
+df.cnot <- as.data.frame(df.cnot)
+## deseq2 condition
+condition_deseq <- data.frame(condition = c("control", "control", "CNOT1_KD", "CNOT1_KD"),
+                              rep = c(rep(c("1", "2"), 2)))
+## combatseq to remove batch effect
+library(sva)
+cnot.matrix <- as.matrix(df.cnot)
+batch <- c(rep(c(1,2), 2))
+adjusted <- ComBat_seq(cnot.matrix, batch=batch, group=NULL)
+
+dds <- DESeqDataSetFromMatrix(countData = adjusted,
+                              colData = condition_deseq,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 1
+dds <- dds[keep,]
+dds <- DESeq(dds)
+res.cnot1 <- results(dds, contrast = c("condition", "CNOT1_KD","control")) %>%
+    as.data.frame() %>% filter(baseMean >= basemean)
+res.cnot1$gene_id <- substr(rownames(res.cnot1), 1, 15)
+## da emetine
+da_emetine <- readRDS(paste0(path.to.data, "da_emetine.rds"))
+da_emetine$gene_id <- rownames(da_emetine)
+## assign log2FC and padj
+number_glori$log2FC_dcp2 <- res.dcp2$log2FoldChange[
+    match(substr(number_glori$Gene_ID,1,15), res.dcp2$gene_id)
+]
+number_glori$padj_dcp2 <- res.dcp2$padj[
+    match(substr(number_glori$Gene_ID,1,15), res.dcp2$gene_id)
+]
+number_glori$log2FC_cnot1 <- res.cnot1$log2FoldChange[
+    match(substr(number_glori$Gene_ID,1,15), res.cnot1$gene_id)
+]
+number_glori$padj_cnot1 <- res.cnot1$padj[
+    match(substr(number_glori$Gene_ID,1,15), res.cnot1$gene_id)
+]
+number_glori$log2FC_emetine <- 
+    da_emetine$log2FoldChange[match(number_glori$Gene_ID, rownames(da_emetine))]
+number_glori$padj_emetine <- 
+    da_emetine$padj[match(number_glori$Gene_ID, rownames(da_emetine))]
+```
+
+```{r}
+## DA result for hrsp12
+df_hrsp12 <- read.table("~/Desktop/Data/GEO/RNAseq_HRSP12/count_HRSP12.txt",
+                        header = T)[,-c(2:6)]
+colnames(df_hrsp12) <- c("gene_id", "HRSP12_KD_1", "HRSP12_KD_2", "WT_1", "WT_2")
+rownames(df_hrsp12) <- df_hrsp12$gene_id
+df_hrsp12$gene_id <- NULL
+## deseq2
+condition_deseq <- data.frame(condition = rep(c("HRSP12_KD", "WT"), each = 2),
+                              rep = c(rep(c("1", "2"), 2)))
+dds_hrsp12 <- DESeqDataSetFromMatrix(countData = df_hrsp12,
+                              colData = condition_deseq,
+                              design = ~ condition)
+keep <- rowSums(counts(dds_hrsp12)) >= 1
+dds_hrsp12 <- dds_hrsp12[keep,]
+dds_hrsp12 <- DESeq(dds_hrsp12)
+da_hrsp12 <- results(dds_hrsp12, contrast = c("condition", "HRSP12_KD", "WT")) %>% as.data.frame()
+## keep the result for properly expressed genes
+da_hrsp12 <- da_hrsp12[da_hrsp12$baseMean >= basemean, ]
+da_hrsp12$gene_id <- rownames(da_hrsp12)
+## assign LFC and padj
+number_glori$log2FC_hrsp12 <- da_hrsp12$log2FoldChange[
+    match(number_glori$Gene_ID, da_hrsp12$gene_id)
+]
+number_glori$padj_hrsp12 <- 
+    da_hrsp12$padj[match(number_glori$Gene_ID, da_hrsp12$gene_id)]
+```
+
+```{r}
+## load UPF1 hl life result ##
+## load annotation file
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+hl_upf1 <- readxl::read_xlsx("~/Desktop/Data/GEO/HL UPF1 KD/HLs UPF1.xlsx")
+## assign gene ID to upf1 table
+hl_upf1$gene_id <- hg38$gene_id[match(hl_upf1$Gene_symbol, hg38$gene_name)]
+
+number_glori$log2FC_hl_upf1 <- hl_upf1$`FC_RNA_HalfLife log2(siUPF1/siCTRL) [BRIC-seq/Tani et al]`[
+    match(number_glori$Gene_ID, hl_upf1$gene_id)
+]
+```
+
+
+```{r}
+## lfc threshold for target identification
+lfc_threshold <- 0.1
+## find out the stm 6 and 9h targets
+stm_6h_target <- 
+    number_glori[which(number_glori$log2FC_stm_6h >= lfc_threshold & 
+                           number_glori$padj_stm6h <= pvalue &
+                           number_glori$log2FC_stm_9h >= lfc_threshold &
+                           number_glori$log2FC_stm_24h >= lfc_threshold),] %>%
+    mutate(group = "STM 6h target",
+           gene_id2 = substr(Gene_ID,1,15))
+
+stm_9h_target <- 
+    number_glori[which(number_glori$log2FC_stm_9h >= lfc_threshold & 
+                           number_glori$padj_stm9h <= pvalue  & 
+                           number_glori$log2FC_stm_24h >= lfc_threshold),] %>%
+    mutate(group = "STM 9h target",
+           gene_id2 = substr(Gene_ID,1,15))
+stm_9h_target <- stm_9h_target[!stm_9h_target$Gene_ID %in% stm_6h_target$Gene_ID,]
+## stm 24h target required the genes do not be up-regulated in 6&9 h STM
+stm_24h_target <- 
+    number_glori[which(number_glori$log2FC_stm_24h >= lfc_threshold & 
+                           number_glori$padj_stm24h <= pvalue),] %>%
+    mutate(group = "STM 24h target",
+           gene_id2 = substr(Gene_ID,1,15))
+stm_24h_target <- stm_24h_target[!stm_24h_target$Gene_ID %in% 
+                                     c(stm_6h_target$Gene_ID, stm_9h_target$Gene_ID),]
+
+## YTHDF2 DCP2 Emetine HRSP12 and CNOT1 target
+ythdf2_target <- 
+    number_glori[which(number_glori$log2FC_ythdf2 >= lfc_threshold & 
+                           number_glori$padj_ythdf2 <= pvalue),] %>%
+    mutate(group = "YTHDF2 target",
+           gene_id2 = substr(Gene_ID,1,15))
+dcp2_target <- 
+    number_glori[which(number_glori$log2FC_dcp2 >= lfc_threshold & 
+                           number_glori$padj_dcp2 <= pvalue),] %>%
+    mutate(group = "DCP2 target",
+           gene_id2 = substr(Gene_ID,1,15))
+cnot1_target <- 
+    number_glori[which(number_glori$log2FC_cnot1 >= lfc_threshold & 
+                           number_glori$padj_cnot1 <= pvalue),] %>%
+    mutate(group = "CNOT1 target",
+           gene_id2 = substr(Gene_ID,1,15))
+emetine_target <- 
+    number_glori[which(number_glori$log2FC_emetine >= lfc_threshold & 
+                           number_glori$padj_emetine <= pvalue),] %>%
+    mutate(group = "Emetine target",
+           gene_id2 = substr(Gene_ID,1,15))
+hrsp12_target <- 
+    number_glori[which(number_glori$log2FC_hrsp12 >= lfc_threshold & 
+                           number_glori$padj_hrsp12 <= pvalue),] %>%
+    mutate(group = "HRSP12 target",
+           gene_id2 = substr(Gene_ID,1,15))
+upf1_target <- 
+    number_glori[which(number_glori$log2FC_hl_upf1 >= 0.2),] %>%
+    mutate(group = "UPF1 target",
+           gene_id2 = substr(Gene_ID,1,15))
+
+control_target <- number_glori[number_glori$padj_stm6h >= 0.7,] %>%
+    mutate(group = "Control",
+           gene_id2 = substr(Gene_ID,1,15))
+```
+
+```{r eval=FALSE, include=FALSE}
+## output target list
+# hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+df <- data.frame(gene_id = unique(c(stm_6h_target$gene_id2, stm_9h_target$gene_id2,
+                                    stm_24h_target$gene_id2, ythdf2_target$gene_id2,
+                                    dcp2_target$gene_id2, cnot1_target$gene_id2,
+                                    emetine_target$gene_id2, hrsp12_target$gene_id2)))
+df$gene_name <- hg38$gene_name[match(df$gene_id, substr(hg38$gene_id,1,15))]
+## m6A number in different genomic region
+number_glori_utr5 <- number_glori[number_glori$location == "UTR5",]
+number_glori_cds <- number_glori[number_glori$location == "CDS",]
+number_glori_utr3 <- number_glori[number_glori$location == "UTR3",]
+
+df$CDS_m6A_number <- number_glori_cds$number[match(df$gene_id, 
+                                                   substr(number_glori_cds$Gene_ID,1,15))]
+df$UTR3_m6A_number <- number_glori_utr3$number[match(df$gene_id, 
+                                                     substr(number_glori_utr3$Gene_ID,1,15))]
+df$UTR5_m6A_number <- number_glori_utr5$number[match(df$gene_id, 
+                                                       substr(number_glori_utr5$Gene_ID,1,15))]
+df$CDS_m6A_number[is.na(df$CDS_m6A_number)] <- 0
+df$UTR3_m6A_number[is.na(df$UTR3_m6A_number)] <- 0
+df$UTR5_m6A_number[is.na(df$UTR5_m6A_number)] <- 0
+
+df$stm6h_target <- ifelse(df$gene_id %in% stm_6h_target$gene_id2, T, F)
+df$stm9h_target <- ifelse(df$gene_id %in% stm_9h_target$gene_id2, T, F)
+df$stm24h_target <- ifelse(df$gene_id %in% stm_24h_target$gene_id2, T, F)
+df$ythdf2_target <- ifelse(df$gene_id %in% ythdf2_target$gene_id2, T, F)
+df$dcp2_target <- ifelse(df$gene_id %in% dcp2_target$gene_id2, T, F)
+df$cnot1_target <- ifelse(df$gene_id %in% cnot1_target$gene_id2, T, F)
+df$emetine_target <- ifelse(df$gene_id %in% emetine_target$gene_id2, T, F)
+df$hrsp12_target <- ifelse(df$gene_id %in% hrsp12_target$gene_id2, T, F)
+
+## LFC
+df$lfc_stm6 <- da_stm_6h$log2FC[match(df$gene_id, substr(da_stm_6h$gene_id, 1, 15))]
+df$lfc_stm9 <- da_stm_9h$log2FC[match(df$gene_id, substr(da_stm_9h$gene_id, 1, 15))]
+df$lfc_stm24 <- da_stm_24h$log2FC[match(df$gene_id, substr(da_stm_24h$gene_id, 1, 15))]
+
+df$lfc_ythdf2 <- da_ythdf2$log2FC[match(df$gene_id, substr(da_ythdf2$gene_id, 1, 15))]
+df$lfc_dcp2 <- res.dcp2$log2FoldChange[match(df$gene_id, substr(res.dcp2$gene_id, 1, 15))]
+df$lfc_cnot1 <- res.cnot1$log2FoldChange[match(df$gene_id, substr(res.cnot1$gene_id, 1, 15))]
+df$lfc_emetine <- da_emetine$log2FoldChange[match(df$gene_id, substr(da_emetine$gene_id, 1, 15))]
+df$lfc_hrsp12 <- da_hrsp12$log2FoldChange[match(df$gene_id, substr(da_hrsp12$gene_id, 1, 15))]
+
+write.xlsx(df, "target_genes.xlsx", sheetName = "Target gene", row.names = F)
+```
+
+## The m6A number in genomic regions for different targets
+
+```{r fig.height=4, fig.width=8}
+## check the m6A number for different target genes
+df <- rbind(control_target[,c("location", "number", "group")],
+            stm_6h_target[,c("location", "number", "group")], 
+            stm_9h_target[,c("location", "number", "group")], 
+            ythdf2_target[,c("location", "number", "group")], 
+            stm_24h_target[,c("location", "number", "group")], 
+            cnot1_target[,c("location", "number", "group")],
+            dcp2_target[,c("location", "number", "group")],
+            emetine_target[,c("location", "number", "group")],
+            hrsp12_target[,c("location", "number", "group")],
+            upf1_target[,c("location", "number", "group")])
+df$group <- factor(df$group, levels = c("Control","STM 6h target", "STM 9h target", "STM 24h target",
+                                        "DCP2 target", "Emetine target", "CNOT1 target",
+                                        "YTHDF2 target", 
+                                        "HRSP12 target","UPF1 target"))
+ggplot(df, aes(x = group, y = number, fill = location)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0, 20)) + 
+    labs(y = "m6A number", x = NULL) + 
+    scale_fill_manual(values = c("UTR5" = m6A_color,
+                                 "CDS" = CDS_color,
+                                 "UTR3" = UTR3_color)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+## UPF1 MA plot and boxplot
+
+```{r}
+hl_upf1$log2FC_upf1 <- hl_upf1$`FC_RNA_HalfLife log2(siUPF1/siCTRL) [BRIC-seq/Tani et al]`
+hl_upf1$hl_ctl <- hl_upf1$`RNA_HalfLife (hr)(siCTRL) [BRIC-seq/Tani et al]`
+hl_upf1$hl_upf1 <- hl_upf1$`RNA_HalfLife (hr)((siUPF1) [BRIC-seq/Tani et al]`
+## label the known regulated genes
+hl_upf1$label <- ifelse(hl_upf1$Gene_symbol %in% c("SMG5", "ATF3", "GADD45B"), 
+                        hl_upf1$Gene_symbol, NA)
+ggplot(hl_upf1, aes(x = hl_ctl, y = log2FC_upf1, label = label)) + 
+    geom_point() + 
+    geom_point(data = hl_upf1[hl_upf1$Gene_symbol %in% c("SMG5", "ATF3", "GADD45B"),],
+               aes(x = hl_ctl, y = log2FC_upf1), color = "red") + 
+    ggrepel::geom_label_repel(color = "red") + 
+    labs(x = "Half lives in WT",
+         y = "Half lives change upon UPF1 KD (log2)") + 
+    geom_hline(yintercept = 0, linetype = 2)
+ggsave(device = "pdf", "HL_upf1.pdf")
+```
+
+```{r}
+number_glori$bin_m6A <- cut(number_glori$number, breaks = c(0,3,6,9,12,Inf))
+number_glori$location <- factor(number_glori$location,
+                                levels = c("UTR5", "CDS", "UTR3", "NO"))
+
+ggplot(number_glori[number_glori$location != "NO",], 
+       aes(x = location, y = log2FC_hl_upf1, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "UPF1") + 
+    labs(y = "LFC of half lives upon UPF1 KD")
+```
+
+## DCP2 CNOT1 and HRSP12 box plot
+
+```{r fig.height=3, fig.width=6}
+## boxplot for DCP2
+ggplot(number_glori[number_glori$location != "NO",], 
+       aes(x = location, y = log2FC_dcp2, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "DCP2")
+```
+
+```{r fig.height=3, fig.width=6}
+## boxplot for CNOT1
+ggplot(number_glori[number_glori$location != "NO",], 
+       aes(x = location, y = log2FC_cnot1, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "CNOT1")
+```
+
+```{r fig.height=3, fig.width=6}
+## boxplot for HRSP12
+ggplot(number_glori[number_glori$location != "NO",], 
+       aes(x = location, y = log2FC_hrsp12, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "HRSP12")
+```
+
+```{r fig.height=7, fig.width=8}
+number_glori_cds <- number_glori[number_glori$location == "CDS",]
+number_glori_utr3 <- number_glori[number_glori$location == "UTR3",]
+
+number_glori_cds$bin_m6A_utr3 <- number_glori_utr3$bin_m6A[
+    match(number_glori_cds$Gene_ID, number_glori_utr3$Gene_ID)
+] %>% as.character(.)
+number_glori_utr3$bin_m6A_cds <- number_glori_cds$bin_m6A[
+    match(number_glori_utr3$Gene_ID, number_glori_cds$Gene_ID)
+]%>% as.character(.)
+number_glori_cds$bin_m6A_utr3[is.na(number_glori_cds$bin_m6A_utr3)] <- "0"
+number_glori_utr3$bin_m6A_cds[is.na(number_glori_utr3$bin_m6A_cds)] <- "0"
+number_glori_cds$bin_m6A_utr3 <- factor(number_glori_cds$bin_m6A_utr3,
+     levels = c("0", "(0,3]", "(3,6]", "(6,9]", "(9,12]", "(12,Inf]"))
+number_glori_utr3$bin_m6A_cds <- factor(number_glori_utr3$bin_m6A_cds,
+     levels = c("0", "(0,3]", "(3,6]", "(6,9]", "(9,12]", "(12,Inf]"))
+p1 <- ggplot(number_glori_cds, aes(x = bin_m6A_utr3, y = log2FC_dcp2, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "3'UTR m6A number", y = "LFC upon DCP2", fill = "CDS m6A number", 
+         title = "DCP2 KO") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p2 <- ggplot(number_glori_cds, aes(fill = bin_m6A_utr3, y = log2FC_dcp2, x = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(fill = "3'UTR m6A number", y = "LFC upon DCP2", x = "CDS m6A number", 
+         title = "DCP2 KO") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1/p2
+```
+
+## HRSP 12 effect
+In this section, we use the classify the YTHDF2 peaks on DRACH and m6A sites into with/without 
+GGUUC motif which is the binding motif for HRSP12 to check if the HRSP12 are mainly effect the m6A 
+sites at 3'UTR.
+
+### With YTHDF2 peaks
+
+```{r}
+DRACN <- "[GAT][GA]AC[TACG]"
+## YTHDF2 peaks
+ythdf2_peaks <-readRDS(paste0(path.to.data, "ythdf2_binding.rds"))
+
+## find out if the peak have GGUUC around
+hrsp12_motif <- "GGTTC"
+## get the surrounding sequence
+ythdf2_peaks$sur_seq <- getSeq(Hsapiens, ythdf2_peaks+25) %>% suppressWarnings()
+## identify the peaks with HRSP12 binding motif
+ythdf2_peaks$HRSP12_motif <- grepl(hrsp12_motif, ythdf2_peaks$sur_seq)
+
+ythdf2_number <- as.data.frame(ythdf2_peaks) %>%
+    group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop")
+## The gene with >=2 DF2 peaks I classify them as DF2 bound
+tmp <- ythdf2_number[ythdf2_number$number >= 2,]
+
+gene_cds_ythdf2 <- tmp$Gene_ID[tmp$location == "CDS"] %>% unique()
+gene_utr3_ythdf2 <- tmp$Gene_ID[tmp$location == "UTR3"] %>% unique()
+
+## Identify the gene with DF2 binding
+gene_both_ythdf2 <- intersect(gene_cds_ythdf2, gene_utr3_ythdf2)
+gene_utr3_ythdf2 <- setdiff(gene_utr3_ythdf2, gene_both_ythdf2)
+gene_cds_ythdf2 <- setdiff(gene_cds_ythdf2, gene_both_ythdf2)
+
+da_hrsp12$gene_id <- rownames(da_hrsp12)
+## use a Hierarchy to decide the group of each gene
+da_hrsp12$bound_ythdf2_hrsp12 <- 
+    case_when(da_hrsp12$gene_id %in% intersect(gene_utr3_ythdf2,
+                  ythdf2_peaks$Gene_ID[ythdf2_peaks$HRSP12_motif == T]) ~ "3'UTR with HRSP12",
+              da_hrsp12$gene_id %in% intersect(gene_cds_ythdf2,
+                  ythdf2_peaks$Gene_ID[ythdf2_peaks$HRSP12_motif == T]) ~ "CDS with HRSP12",
+              da_hrsp12$gene_id %in% gene_cds_ythdf2 ~ "CDS",
+              da_hrsp12$gene_id %in% gene_utr3_ythdf2 ~ "3'UTR",
+              da_hrsp12$gene_id %in% gene_both_ythdf2 ~ "Both",
+              T ~ "No")
+```
+
+```{r fig.height=4, fig.width=4}
+ggplot(da_hrsp12, aes(x = log2FoldChange, color = bound_ythdf2_hrsp12)) + 
+    stat_ecdf() +
+    coord_cartesian(xlim = c(-3,3)) + 
+    labs(y = "Accumulated fraction", x = "Log2FC upon HRSP12 KD",
+         color = "YTHDF2&/HRSP12", title = "HRSP12")
+```
+
+### With m6A
+
+```{r fig.height=3, fig.width=3}
+## repeat the same analysis with m6A sites instead of DF2 peaks
+tmp <- number_glori[number_glori$number >= 2,]
+gene_cds_m6A <- tmp$Gene_ID[tmp$location == "CDS"] %>% unique()
+gene_utr3_m6A <- tmp$Gene_ID[tmp$location == "UTR3"] %>% unique()
+
+gene_both_m6A <- intersect(gene_cds_m6A, gene_utr3_m6A)
+gene_utr3_m6A <- setdiff(gene_utr3_m6A, gene_both_m6A)
+gene_cds_m6A <- setdiff(gene_cds_m6A, gene_both_m6A)
+
+## get the sequence and identify the sites with HRSP12 binding motif
+m6A_hek_GLORI$sur_seq <- getSeq(Hsapiens, m6A_hek_GLORI+25) %>% suppressWarnings()
+m6A_hek_GLORI$HRSP12_motif <- grepl(hrsp12_motif, m6A_hek_GLORI$sur_seq)
+
+da_hrsp12$m6A_hrsp12 <- 
+    case_when(da_hrsp12$gene_id %in% intersect(gene_utr3_m6A,
+                  m6A_hek_GLORI$Gene_ID[m6A_hek_GLORI$HRSP12_motif == T]) ~ "3'UTR with HRSP12",
+              da_hrsp12$gene_id %in% intersect(gene_cds_m6A,
+                  m6A_hek_GLORI$Gene_ID[m6A_hek_GLORI$HRSP12_motif == T]) ~ "CDS with HRSP12",
+              da_hrsp12$gene_id %in% gene_cds_m6A ~ "CDS",
+              da_hrsp12$gene_id %in% gene_utr3_m6A ~ "3'UTR",
+              da_hrsp12$gene_id %in% gene_both_m6A ~ "Both",
+              T ~ "No")
+ggplot(da_hrsp12, aes(x = log2FoldChange, color = m6A_hrsp12)) + 
+    stat_ecdf() +
+    coord_cartesian(xlim = c(-3,3)) + 
+    labs(y = "Accumulated fraction", x = "Log2FC upon HRSP12 KD",
+         color = "m6A + HRSP12", title = "HRSP12")
+```
+
+\FloatBarrier
+
+# P-body enrichment
+
+```{r}
+## load p body enrichment data
+p_body <- readxl::read_xlsx("~/Desktop/Data/GEO/P_body_and_stress_granule/p_body.xlsx") %>% 
+    as.data.frame(.)
+colnames(p_body)[3:5] <- c("log2FC", "p_value", "Padj")
+## turn the value into correct data type
+p_body$log2FC<- as.numeric(p_body$log2FC)
+p_body$Padj <- as.numeric(p_body$Padj)
+p_body <- p_body[!is.na(p_body$`Ensembl Gene ID`),]
+
+## subset p-body enrichment table by the target gene list
+df <- rbind(p_body[p_body$`Ensembl Gene ID` %in% control_target$gene_id2,] %>% 
+                mutate(target = "Control"),
+            p_body[p_body$`Ensembl Gene ID` %in% stm_6h_target$gene_id2,] %>% 
+                mutate(target = "STM 6h"), 
+            p_body[p_body$`Ensembl Gene ID` %in% stm_9h_target$gene_id2,] %>% 
+                mutate(target = "STM 9h"), 
+            p_body[p_body$`Ensembl Gene ID` %in% stm_24h_target$gene_id2,] %>% 
+                mutate(target = "STM 24h"), 
+            p_body[p_body$`Ensembl Gene ID` %in% dcp2_target$gene_id2,] %>% 
+                mutate(target = "DCP2"),
+            p_body[p_body$`Ensembl Gene ID` %in% emetine_target$gene_id2,] %>% 
+                mutate(target = "Emetine"),
+            p_body %>% mutate(target = "All"))
+df$target <- factor(df$target, levels = c("Control","STM 6h", "STM 9h", 
+                                        "STM 24h", "DCP2", 
+                                        "Emetine","CNOT1", "YTHDF2", 
+                                        "UPF1", "All"))
+p1 <- ggplot(df, aes(x = log2FC, color = target)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Enrichment at P-body (log2FC)", title = "P-body") + 
+    geom_vline(xintercept = 0, linetype = 2) + 
+    coord_cartesian(xlim = c(-5,5))
+
+p1
+```
+
+```{r}
+ggplot(df, aes(x = target, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-5,5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r}
+df <- rbind(p_body[p_body$`Ensembl Gene ID` %in% control_target$gene_id2,] %>% 
+                mutate(target = "Control"),
+            p_body[p_body$`Ensembl Gene ID` %in% ythdf2_target$gene_id2,] %>% 
+                mutate(target = "YTHDF2"),
+            p_body[p_body$`Ensembl Gene ID` %in% cnot1_target$gene_id2,] %>% 
+                mutate(target = "CNOT1"),
+            p_body[p_body$`Ensembl Gene ID` %in% upf1_target$gene_id2,] %>% 
+                mutate(target = "UPF1"),
+            p_body[p_body$`Ensembl Gene ID` %in% hrsp12_target$gene_id2,] %>% 
+                mutate(target = "HRSP12"),
+            p_body %>% mutate(target = "All"))
+df$target <- factor(df$target, levels = c("Control","STM 6h", "STM 9h", 
+                                        "STM 24h", "DCP2", 
+                                        "Emetine","CNOT1", "YTHDF2", 
+                                        "UPF1", "HRSP12", "All"))
+p1 <- ggplot(df, aes(x = log2FC, color = target)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Enrichment at P-body (log2FC)", title = "P-body") + 
+    geom_vline(xintercept = 0, linetype = 2) + 
+    coord_cartesian(xlim = c(-5,5))
+
+p2 <- ggplot(df, aes(x = target, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-5,5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1+p2
+```
+
+## The m6A number for transcripts which enriched at P-body
+
+```{r fig.height=6, fig.width=6}
+## set the threshold for subset genes
+lfc_test <- c(1, 1.5, 2, 2.5, 3)
+## first subgroup for initiate the for loop
+tmp <- p_body[which(p_body$Padj < pvalue & p_body$log2FC > 0),]
+p_body_df <- number_glori[substr(number_glori$Gene_ID, 1, 15) %in% 
+                              tmp$`Ensembl Gene ID`,] %>%
+    mutate(group = "P body", LFC_threshold = as.factor(0))
+
+## for loop to use all the threshold to subset genes
+for (i in lfc_test) {
+    tmp <- p_body[which(p_body$Padj < pvalue & p_body$log2FC > i),]
+    tmp2 <- number_glori[substr(number_glori$Gene_ID, 1, 15) %in% 
+                                  tmp$`Ensembl Gene ID`,] %>%
+    mutate(group = "P body", LFC_threshold = as.factor(i))
+    
+    p_body_df <- rbind(p_body_df, tmp2)
+}
+p1 <- ggplot(p_body_df, aes(x = LFC_threshold, fill = location)) + 
+    geom_bar(position = position_dodge()) + 
+    geom_text(aes(label = ..count..), stat = "count", position = position_dodge(width = 0.9)) + 
+    scale_fill_manual(values = c("UTR5" = m6A_color,
+                                 "CDS" = CDS_color,
+                                 "UTR3" = UTR3_color))
+p2 <- ggplot(p_body_df, aes(x = LFC_threshold, y = number, fill = location)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0, 30)) + 
+    labs(y = "m6A number", x = "LFC threshold for p-body enrichment",
+         title = "P-body enriched genes") + 
+    scale_fill_manual(values = c("UTR5" = m6A_color,
+                                 "CDS" = CDS_color,
+                                 "UTR3" = UTR3_color))
+p1/p2
+```
+
+```{r fig.height=12, fig.width=8, fig.cap="Genes with CDS m6A"}
+## assign LFC to p-body table
+p_body$log2FC_ythdf2 <- da_ythdf2$log2FC[match(
+    p_body$`Ensembl Gene ID`, substr(da_ythdf2$gene_id,1,15)
+)]
+p_body$log2FC_stm6h <- da_stm_6h$log2FC[match(
+    p_body$`Ensembl Gene ID`, substr(da_stm_6h$gene_id,1,15)
+)]
+p_body$log2FC_dcp2 <- res.dcp2$log2FoldChange[match(
+    p_body$`Ensembl Gene ID`, substr(res.dcp2$gene_id,1,15)
+)]
+p_body$log2FC_cnot1 <- res.cnot1$log2FoldChange[match(
+    p_body$`Ensembl Gene ID`, substr(res.cnot1$gene_id,1,15)
+)]
+p_body$log2FC_emetine <- da_emetine$log2FoldChange[match(
+    p_body$`Ensembl Gene ID`, substr(da_emetine$gene_id,1,15)
+)]
+p_body$log2FC_upf1 <- hl_upf1$`FC_RNA_HalfLife log2(siUPF1/siCTRL) [BRIC-seq/Tani et al]`[match(
+    p_body$`Ensembl Gene ID`, substr(hl_upf1$gene_id,1,15)
+)]
+p_body$log2FC_hrsp12 <- da_hrsp12$log2FoldChange[match(
+    p_body$`Ensembl Gene ID`, substr(da_hrsp12$gene_id,1,15)
+)]
+
+## set the bin for p-body enrichment LFC
+p_body$log2FC_bin <- cut(p_body$log2FC, breaks = c(-Inf, seq(-3,3,0.5), Inf))
+## keep the genes with at least one m6A sites
+p_body_f <- p_body[p_body$`Ensembl Gene ID` %in% 
+                       substr(number_glori$Gene_ID,1,15),]
+## plotting for each treatment
+p1 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_ythdf2)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "YTHDF2")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_ythdf2, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+p2 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_stm6h)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "STM6h")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_stm6h, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+p3 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_dcp2)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "DCP2")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_dcp2, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+p4 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_cnot1)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "CNOT1")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_cnot1, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+p5 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_emetine)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "Emetine")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_emetine, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+p6 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_upf1)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "UPF1")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_upf1, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+p7 <- ggplot(p_body_f, 
+       aes(x = log2FC_bin, y = log2FC_hrsp12)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    labs(x = "LFC threshold for p-body enrichment",
+         title = "HRSP12")  + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    annotate("text", x = 4, y = 1.3, label = paste0("rho = ",
+        cor.test(p_body_f$log2FC, p_body_f$log2FC_hrsp12, 
+                 method = "spearman", exact=FALSE)$estimate %>% round(., 3)))
+
+l <- list(p2,p3,p5,p1,p4,p6,p7)
+grid.arrange(grobs = l, ncol = 3)
+```
+
+```{r fig.height=9, fig.width=6}
+df <- p_body_f[,c(1,20:26)]
+colnames(df)[1] <- c("gene_id")
+df <- df %>% pivot_longer(!gene_id, names_to = "Treatment", values_to = "log2FC")
+df$log2FC_pbody_bin <- p_body_f$log2FC_bin[match(df$gene_id, p_body_f$`Ensembl Gene ID`)]
+
+df2 <- df %>% group_by(log2FC_pbody_bin, Treatment) %>% 
+    summarise(median_log2FC = median(log2FC, na.rm = TRUE), .groups = "drop")
+
+## function for zscore calculatioon
+zscore<- function(x) {
+  media<-mean(x, na.rm = T)
+  stdev<-sd(x, na.rm = T)
+  zscores <-(x-media)/stdev
+  return(zscores)
+}
+Min_max_normalization <- function(x) {
+  min<-min(x, na.rm = T)
+  max<-max(x, na.rm = T)
+  Min_max_normalization <-(x-min)/(max-min)
+  return(Min_max_normalization)
+}
+
+
+## use z-score to do the normalization for median log2FC
+df2 <- df2 %>% group_by(Treatment) %>% 
+    mutate(z_score = zscore(median_log2FC),
+           min_max_normalization = Min_max_normalization(median_log2FC))
+df2$Treatment <- factor(df2$Treatment, 
+    levels = rev(c("log2FC_stm6h", "log2FC_emetine", "log2FC_dcp2", "log2FC_stm9h",
+               "log2FC_stm24h", "log2FC_ythdf2", "log2FC_cnot1", "log2FC_hrsp12", "log2FC_upf1")))
+
+p1 <- ggplot(df2, aes(y = Treatment, x = log2FC_pbody_bin, fill= median_log2FC)) + 
+  geom_tile() +
+  scale_fill_gradientn(colours=c(UTR3_color,"white",DRACH_color)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = "P-bodies enrichment", y = "Treatment")
+
+p2 <- ggplot(df2, aes(y = Treatment, x = log2FC_pbody_bin, fill= min_max_normalization)) + 
+  geom_tile() +
+  scale_fill_gradientn(colours=c(UTR3_color,"white",DRACH_color)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = "P-bodies enrichment", y = "Treatment")
+
+p3 <- ggplot(df2, aes(y = Treatment, x = log2FC_pbody_bin, fill= z_score)) + 
+  geom_tile() +
+  scale_fill_gradientn(colours=c(UTR3_color,"white",DRACH_color)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = "P-bodies enrichment", y = "Treatment")
+
+p1/p2/p3
+```
+
+\FloatBarrier
+
+# LFC upon STM245 6h 9h and 24h for different targets
+
+```{r fig.height=4, fig.width=9}
+## subset the DA result based on the target gene list
+df1 <- da_stm_6h[da_stm_6h$gene_id %in% dcp2_target$Gene_ID,] %>% mutate(target = "DCP2")
+df2 <- da_stm_6h[da_stm_6h$gene_id %in% cnot1_target$Gene_ID,] %>% mutate(target = "CNOT1")
+df3 <- da_stm_6h[da_stm_6h$gene_id %in% hrsp12_target$Gene_ID,] %>% mutate(target = "HRSP12")
+df4 <- da_stm_6h[da_stm_6h$gene_id %in% ythdf2_target$Gene_ID,] %>% mutate(target = "YTHDF2")
+df5 <- da_stm_6h[da_stm_6h$gene_id %in% emetine_target$Gene_ID,] %>% mutate(target = "Emetine")
+df6 <- da_stm_6h[da_stm_6h$gene_id %in% upf1_target$Gene_ID,] %>% mutate(target = "UPF1")
+
+## plotting
+p1 <- rbind(df1, df2, df3, df4, df5, df6) %>%
+    ggplot(., aes(y = log2FC, x = target)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(y = "LFC upon STM 6h", title = "STM 6h") + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+df1 <- da_stm_9h[da_stm_9h$gene_id %in% dcp2_target$Gene_ID,] %>% mutate(target = "DCP2")
+df2 <- da_stm_9h[da_stm_9h$gene_id %in% cnot1_target$Gene_ID,] %>% mutate(target = "CNOT1")
+df3 <- da_stm_9h[da_stm_9h$gene_id %in% hrsp12_target$Gene_ID,] %>% mutate(target = "HRSP12")
+df4 <- da_stm_9h[da_stm_9h$gene_id %in% ythdf2_target$Gene_ID,] %>% mutate(target = "YTHDF2")
+df5 <- da_stm_9h[da_stm_9h$gene_id %in% emetine_target$Gene_ID,] %>% mutate(target = "Emetine")
+df6 <- da_stm_9h[da_stm_9h$gene_id %in% upf1_target$Gene_ID,] %>% mutate(target = "UPF1")
+
+p2 <- rbind(df1, df2, df3, df4, df5, df6) %>%
+    ggplot(., aes(y = log2FC, x = target)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(y = "LFC upon STM 9h", title = "STM 9h") + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+df1 <- da_stm_24h[da_stm_24h$gene_id %in% dcp2_target$Gene_ID,] %>% mutate(target = "DCP2")
+df2 <- da_stm_24h[da_stm_24h$gene_id %in% cnot1_target$Gene_ID,] %>% mutate(target = "CNOT1")
+df3 <- da_stm_24h[da_stm_24h$gene_id %in% hrsp12_target$Gene_ID,] %>% mutate(target = "HRSP12")
+df4 <- da_stm_24h[da_stm_24h$gene_id %in% ythdf2_target$Gene_ID,] %>% mutate(target = "YTHDF2")
+df5 <- da_stm_24h[da_stm_24h$gene_id %in% emetine_target$Gene_ID,] %>% mutate(target = "Emetine")
+df6 <- da_stm_24h[da_stm_24h$gene_id %in% upf1_target$Gene_ID,] %>% mutate(target = "UPF1")
+
+p3 <- rbind(df1, df2, df3, df4, df5, df6) %>%
+    ggplot(., aes(y = log2FC, x = target)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(y = "LFC upon STM 24h", title = "STM 24h") + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+p1+p2+p3
+```
+
+
+## How targets react to STM treatment? {.tabset}
+
+```{r}
+## make a column with same name for LFC in all DA result. This allow the function easily access 
+## the right column
+hl_upf1$log2FC <- hl_upf1$`FC_RNA_HalfLife log2(siUPF1/siCTRL) [BRIC-seq/Tani et al]`
+res.dcp2$log2FC <- res.dcp2$log2FoldChange
+res.cnot1$log2FC <- res.cnot1$log2FoldChange
+da_emetine$log2FC <- da_emetine$log2FoldChange
+da_hrsp12$log2FC <- da_hrsp12$log2FoldChange
+
+make_box <- function(target, title){
+    df <- rbind(da_emetine[da_emetine$gene_id %in% target,] %>% 
+                    dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "Emetine"),
+          da_hrsp12[da_hrsp12$gene_id %in% target,] %>% dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "HRSP12"),
+          da_ythdf2[da_ythdf2$gene_id %in% target,] %>% dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "YTHDF2"),
+          res.dcp2[res.dcp2$gene_id %in% substr(target,1,15),] %>% 
+              dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "DCP2"),
+          res.cnot1[res.cnot1$gene_id %in% substr(target,1,15),] %>% 
+              dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "CNOT1"),
+          hl_upf1[hl_upf1$gene_id %in% target,] %>% dplyr::select(., c(log2FC, gene_id)) %>% 
+              mutate(group = "UPF1"))
+    df$group <- factor(df$group, levels = c("DCP2", "Emetine","YTHDF2", "CNOT1", "UPF1", "HRSP12"))
+    p1 <- ggplot(df, aes(x = group , y = log2FC)) + 
+        geom_boxplot(outlier.shape = NA) + 
+        coord_cartesian(ylim = c(-1.5,1.5)) + 
+        labs(title = title) + 
+        geom_hline(yintercept = 0, linetype = 2)
+    return(p1)
+}
+```
+
+### STM6h
+
+```{r}
+make_box(stm_6h_target$Gene_ID %>% unique(), "STM 6h")
+```
+
+### STM9h
+
+```{r}
+make_box(stm_9h_target$Gene_ID %>% unique(), "STM 9h")
+```
+
+### STM24h
+
+```{r}
+make_box(stm_24h_target$Gene_ID %>% unique(), "STM 24h")
+```
+
+## {-}
+
+\FloatBarrier
+
+# The DCP2 LFC correlates to the Emetine LFC
+
+```{r fig.height=4, fig.width=4}
+## assign LFC upon DCP2 KO to emetine result
+da_emetine$lfc_dcp2 <- res.dcp2$log2FoldChange[match(substr(da_emetine$gene_id,1,15), 
+                                                         res.dcp2$gene_id)]
+## bin LFC upon emetine treatment
+da_emetine$bin_lfc_emetine <- cut(da_emetine$log2FoldChange, 
+                               breaks = c(-Inf, seq(-1.5,1.5,0.5), Inf))
+
+ggplot(da_emetine, aes(x = bin_lfc_emetine, y = lfc_dcp2)) +
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-2,2)) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(y = "LFC upon DCP2 KO", x = "LFC upon Emetine")
+```
+\FloatBarrier
+
+# STM 3h target in mESC
+
+```{r}
+## load the STM 3h result in mESC
+path.RNAseq <- "~/Desktop/Data/time_stm/deseq2 all genes/"
+da.list.RNAseq <- list()
+file.RNAseq <- list.files(path.RNAseq, pattern = "vs")[c(2,3,4,1)]
+
+## read da result for time series data
+da.stm3h_mESC <- read_Anke_DA(paste0(path.RNAseq, file.RNAseq[1]))
+da.stm3h_mESC <- da.stm3h_mESC[da.stm3h_mESC$baseMean >=basemean,]
+
+m6A_mESC <- readRDS("~/Desktop/Data/m6Asites/mESC_m6A_sc_profile.rds")
+number_m6A_mESC <- as.data.frame(m6A_mESC) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups= "drop")
+```
+
+```{r}
+number_m6A_mESC$log2FC_stm3h <- da.stm3h_mESC$log2FC[match(
+    number_m6A_mESC$Gene_ID, da.stm3h_mESC$gene_id
+)]
+number_m6A_mESC$padj_stm3h <- da.stm3h_mESC$BH.adjusted.p.values[match(
+    number_m6A_mESC$Gene_ID, da.stm3h_mESC$gene_id
+)]
+
+number_m6A_mESC$bin_m6A <- cut(number_m6A_mESC$number, breaks = c(0,2,4,6,Inf))
+number_m6A_mESC <- number_m6A_mESC[number_m6A_mESC$location != "NO",]
+number_m6A_mESC$location <- factor(number_m6A_mESC$location, levels = c("UTR5", "CDS", "UTR3"))
+ggplot(number_m6A_mESC, aes(x = location, y = log2FC_stm3h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) +
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(y = "LFC upon STM2457 3h", title = "STM 3h mESC")
+```
+
+```{r}
+library(biomaRt)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+
+## stm3h target in mESC
+mESC_stm3h_target <- number_m6A_mESC[which(number_m6A_mESC$padj_stm3h <= pvalue &
+                                           number_m6A_mESC$log2FC_stm3h >= 0.3),]
+## GO enrichment analysis
+universe_mESC <- da.stm3h_mESC$gene_id %>% substr(., 1, 18) %>% unique(.)
+universe_mESC <- universe_mESC[!grepl("ERCC", universe_mESC)]
+mart_mESC <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "mmusculus_gene_ensembl",
+                  host = "sep2019.archive.ensembl.org", path = "/biomart/martservice",
+                  archive = FALSE)
+
+entre_stm_3h_mESC <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+                     filters = 'ensembl_gene_id', 
+                     values = substr(mESC_stm3h_target$Gene_ID, 1,18)  %>% unique(.),
+                     mart = mart_mESC)
+entre_universe_mESC <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'),
+                     filters = 'ensembl_gene_id',
+                     values = universe_mESC,
+                     mart = mart_mESC)
+
+```
+
+```{r eval=FALSE, include=FALSE}
+mm10 <- import.gff3("~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")
+df <- data.frame(gene_ID = unique(mESC_stm3h_target$Gene_ID))
+df$gene_name <- mm10$gene_name[match(df$gene_ID, mm10$gene_id)]
+
+df$log2FC_stm3h <- da.stm3h_mESC$log2FC[match(df$gene_ID, da.stm3h_mESC$gene_id)]
+df$padj <- da.stm3h_mESC$BH.adjusted.p.values[match(df$gene_ID, da.stm3h_mESC$gene_id)]
+
+mESC_stm3h_target_cds <- mESC_stm3h_target[mESC_stm3h_target$location == "CDS",]
+mESC_stm3h_target_utr3 <- mESC_stm3h_target[mESC_stm3h_target$location == "UTR3",]
+mESC_stm3h_target_utr5 <- mESC_stm3h_target[mESC_stm3h_target$location == "UTR5",]
+
+df$CDS_m6A <- mESC_stm3h_target_cds$number[match(df$gene_ID, mESC_stm3h_target_cds$Gene_ID)]
+df$UTR3_m6A <- mESC_stm3h_target_utr3$number[match(df$gene_ID, mESC_stm3h_target_utr3$Gene_ID)]
+df$UTR5_m6A <- mESC_stm3h_target_utr5$number[match(df$gene_ID, mESC_stm3h_target_utr5$Gene_ID)]
+df[is.na(df)] <- 0
+
+write.xlsx(df, "mESC 3h STM targets.xlsx")
+```
+
+```{r}
+## stm 3h
+stm_3h_GO <- enrichGO(entre_stm_3h_mESC$entrezgene_id,
+                  OrgDb = org.Mm.eg.db, 
+                  universe = entre_universe_mESC$entrezgene_id %>% as.character(.),
+                  pvalueCutoff = 0.1, ont = "BP",
+                  readable=T)
+write.xlsx(as.data.frame(stm_3h_GO), "GO enrichment 3h STM in mESC.xlsx")
+dotplot(stm_3h_GO, showCategory=30,font.size = 6) + ggtitle("STM 3h target GO mESC (BP)") +
+  scale_y_discrete(labels=function(x) str_wrap(x, width=40))
+```
+
+# GO enrichment analysis for different targets
+
+```{r}
+## use the expressed gene in STM 24h as background
+universe <- c(da_stm_24h$gene_id[da_stm_24h$baseMean >= basemean],
+              da_stm_6h$gene_id[da_stm_6h$baseMean >= basemean],
+              da_stm_9h$gene_id[da_stm_6h$baseMean >= basemean],
+              da_emetine$gene_id[da_emetine$baseMean >= basemean],
+              da_ythdf2$gene_id[da_ythdf2$baseMean >= basemean],
+              res.cnot1$gene_id[res.cnot1$baseMean >= basemean],
+              res.dcp2$gene_id[res.dcp2$baseMean >= basemean],
+              da_hrsp12$gene_id[da_hrsp12$baseMean >= basemean])
+universe <- substr(universe, 1, 15) %>% unique(.)
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl",
+                  host = "sep2019.archive.ensembl.org", path = "/biomart/martservice",
+                  archive = FALSE)
+## get entrez ID for GO enrichment analysis
+entre_stm_6h <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+                     filters = 'ensembl_gene_id', 
+                     values = unique(stm_6h_target$gene_id2), 
+                     mart = mart)
+# entre_stm_9h <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(stm_9h_target$gene_id2), 
+#                      mart = mart)
+# entre_stm_24h <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(stm_24h_target$gene_id2), 
+#                      mart = mart)
+# entre_ythdf2 <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(ythdf2_target$gene_id2), 
+#                      mart = mart)
+# entre_dcp2 <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(dcp2_target$gene_id2), 
+#                      mart = mart)
+# entre_cnot1 <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(cnot1_target$gene_id2), 
+#                      mart = mart)
+# entre_emetine <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(emetine_target$gene_id2), 
+#                      mart = mart)
+# entre_hrsp12 <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(hrsp12_target$gene_id2), 
+#                      mart = mart)
+# entre_upf1 <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+#                      filters = 'ensembl_gene_id', 
+#                      values = unique(upf1_target$gene_id2), 
+#                      mart = mart)
+entre_universe <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'),
+                     filters = 'ensembl_gene_id',
+                     values = universe,
+                     mart = mart)
+```
+
+## STM 6h
+
+```{r}
+## stm 6h
+stm_6h_GO <- enrichGO(entre_stm_6h$entrezgene_id,
+                  OrgDb = org.Hs.eg.db, 
+                  universe = entre_universe$entrezgene_id %>% as.character(.),
+                  pvalueCutoff = 0.1, ont = "BP",
+                  readable=T)
+dotplot(stm_6h_GO, showCategory=30,font.size = 6) + ggtitle("STM 6h target GO (BP)") +
+  scale_y_discrete(labels=function(x) str_wrap(x, width=40))
+```
+
+```{r eval=FALSE, include=FALSE}
+## table for STM6h targets
+df <- as.data.frame(stm_6h_GO)
+df_f <- df[grep("development", df$Description),]
+df_ff <- df[grep("morphogenesis", df$Description),]
+df_dev_mor <- rbind(df_f, df_ff)
+
+related_genes <- strsplit(df_dev_mor$geneID, split = "/") %>% unlist(.) %>% unique(.)
+related_genes <- data.frame(gene_name = related_genes)
+related_genes$gene_id <- hg38$gene_id[match(related_genes$gene_name, hg38$gene_name)]
+##
+number_glori_cds <- number_glori[number_glori$location == "CDS",]
+number_glori_utr3 <- number_glori[number_glori$location == "UTR3",]
+number_glori_utr5 <- number_glori[number_glori$location == "UTR5",]
+
+related_genes$cds_m6A <- number_glori_cds$number[match(related_genes$gene_id,
+                                                       number_glori_cds$Gene_ID)]
+related_genes$utr3_m6A <- number_glori_utr3$number[match(related_genes$gene_id,
+                                                       number_glori_utr3$Gene_ID)]
+related_genes$utr5_m6A <- number_glori_utr5$number[match(related_genes$gene_id,
+                                                       number_glori_utr5$Gene_ID)]
+related_genes[is.na(related_genes)] <- 0
+## 
+hg38_exon <- hg38[hg38$type == "exon"] 
+hg38_exon$exon_number <- as.numeric(hg38_exon$exon_number)
+hg38_exon <- as.data.frame(hg38_exon) %>%
+    group_by(transcript_id) %>% mutate(trans_len = sum(width),
+                                       max_exon = max(exon_number)) %>% ungroup(.) %>%
+    group_by(gene_id) %>% filter(exon_number == max_exon)
+related_genes$transcript_length <- hg38_exon$trans_len[match(related_genes$gene_id,
+                                                             hg38_exon$gene_id)]
+related_genes$exon_number <- hg38_exon$max_exon[match(related_genes$gene_id,
+                                                             hg38_exon$gene_id)]
+related_genes <- related_genes[order(-related_genes$cds_m6A, related_genes$utr3_m6A, 
+                                     related_genes$utr5_m6A),]
+write.xlsx(related_genes, "Dev and Morph related STM6h target genes.xlsx")
+write.xlsx(as.data.frame(stm_6h_GO), "GO enrichment for STM6h target.xlsx")
+```
+
+# Retrogene and intronless genes
+
+```{r fig.height=4, fig.width=4}
+## load retrogene list
+retrogenes <- read_xls("~/Desktop/Data/gene_lists/retrogenes_list.xls")
+## keep the rows for human but not other species
+retrogenes_human <- retrogenes[retrogenes$Species == "human",]
+# retrogenes_human$gene_name_retro <- hg38$gene_name[match(retrogenes_human$`Retrogene Ensembl Gene ID`,
+#                                                          substr(hg38$gene_id,1,15))]
+# retrogenes_human$gene_name_parental <- hg38$gene_name[match(retrogenes_human$`Parental Ensembl Gene ID`,
+#                                                          substr(hg38$gene_id,1,15))]
+# write.xlsx(retrogenes_human, "retro_gene_list.xlsx")
+
+## extract retrogene and parental genes 
+df <- da_stm_6h[substr(da_stm_6h$gene_id,1,15) %in% retrogenes_human$`Retrogene Ensembl Gene ID`,] %>%
+    mutate(group = "Retrogene")
+df2 <- da_stm_6h[substr(da_stm_6h$gene_id,1,15) %in% retrogenes_human$`Parental Ensembl Gene ID`,] %>%
+    mutate(group = "Parental genes")
+tmp <- rbind(df, df2)
+```
+
+```{r fig.height=4, fig.width=4}
+tmp2 <- tmp[tmp$gene_id %in% m6A_hek_GLORI$Gene_ID,]
+ggplot(tmp2,
+       aes(y = log2FC, x = group)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(x = "Group",
+         y = "LFC upon STM6h",
+         color = "Gene group",
+         title = "Genes with m6A sites")+ 
+    geom_vline(xintercept = 0, linetype = 2) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    coord_cartesian(ylim = c(-1.5,1.5))
+ggsave(device = "pdf", "pics/retrogene with m6A boxplot.pdf")
+```
+
+```{r  fig.height=4, fig.width=4}
+m6A_number_GLORI_cds <- number_glori[number_glori$location == "CDS",]
+tmp2$CDS_m6A <-  m6A_number_GLORI_cds$number[match(tmp2$gene_id, m6A_number_GLORI_cds$Gene_ID)]
+ggplot(tmp2, aes(x = group, y = CDS_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "CDS m6A number")
+ggsave(device = "pdf", "pics/CDS m6A number retrogenes.pdf")
+```
+
+## Intronless genes
+For the tested genes, I separate them based on whether there are introns and whether there are m6As.
+
+```{r fig.height=5, fig.width=5}
+## extract the CDS annotation
+hg38_cds <- hg38[hg38$type == "CDS"]
+## calculate the number of annotated CDS for each transcript 
+cds_number <- as.data.frame(hg38_cds) %>% group_by(gene_id, transcript_id) %>%
+    summarise(cds_number = n(), .groups = "drop")
+## for each gene keep the transcript with highest number of annotated CDS
+cds_number <- cds_number[order(cds_number$cds_number, decreasing = T),]
+cds_number_max <- cds_number %>% group_by(gene_id) %>% filter(row_number() == 1)
+
+## identify the intronless genes
+hg38_without_intron <- cds_number_max[cds_number_max$cds_number == 1,]
+
+hg38_without_intron$cds_m6A <- m6A_number_GLORI_cds$number[match(hg38_without_intron$gene_id,
+                                                                 m6A_number_GLORI_cds$Gene_ID)]
+
+hg38_without_intron$log2FC_stm6h <- da_stm_6h$log2FC[match(hg38_without_intron$gene_id,
+                                                           da_stm_6h$gene_id)]
+hg38_without_intron$group <- "CDS without m6A without intron"
+
+out <- data.frame(hg38_without_intron$gene_id)
+colnames(out) <- "gene_id"
+out$gene_name <- hg38$gene_name[match(out$gene_id, hg38$gene_id)]
+write.xlsx(out, "intron_less_gene_list.xlsx")
+
+## split the result based on whether it contain CDS m6A
+df3 <- hg38_without_intron[hg38_without_intron$gene_id %in% 
+                                               m6A_number_GLORI_cds$Gene_ID,]
+df3$group <- "CDS with m6A without intron"
+df4 <- hg38_without_intron[!hg38_without_intron$gene_id %in% 
+                                               m6A_number_GLORI_cds$Gene_ID,]
+
+df <- data.frame(gene_id = "n", transcript_id = "n", 
+                 cds_number = 0, cds_m6A = 0, 
+                 log2FC_stm6h = da_stm_6h$log2FC[!da_stm_6h$gene_id %in% m6A_number_GLORI_cds$Gene_ID],
+                 group = "CDS without m6A with intron")
+df <- df[!df$gene_id %in% hg38_without_intron$gene_id,]
+
+df2 <- data.frame(gene_id = da_stm_6h$gene_id[da_stm_6h$gene_id %in% m6A_number_GLORI_cds$Gene_ID],
+                  transcript_id = "n", 
+                 cds_number = 0, cds_m6A = 0, 
+                 log2FC_stm6h = da_stm_6h$log2FC[da_stm_6h$gene_id %in% m6A_number_GLORI_cds$Gene_ID],
+                 group = "CDS with m6A and intron")
+df2 <- df2[!df2$gene_id %in% hg38_without_intron$gene_id,]
+
+tmp <- rbind(df3,df4, df, df2)
+ggplot(tmp, aes(x = log2FC_stm6h, color = group)) + 
+    stat_ecdf() + 
+    coord_cartesian(xlim = c(-2,2))+ 
+    labs(y = "Accumulated franction", color = "Genes")
+ggsave(device = "pdf", "pics/Intronless.pdf")
+```
+
+```{r fig.height=4, fig.width=6}
+ggplot(tmp, aes(y = log2FC_stm6h, x = group)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5))+ 
+    labs(y = "Accumulated franction", color = "Genes", x = NULL) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+ggsave(device = "pdf", "pics/Intronless boxplot.pdf")
+```
+
+```{r fig.height=4, fig.width=4}
+m6A_number_GLORI_cds$With_intron <- ifelse(m6A_number_GLORI_cds$Gene_ID %in% hg38_without_intron$gene_id,
+                                           "Without intron", "With intron")
+
+ggplot(m6A_number_GLORI_cds, aes(x = With_intron, y = number)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,30)) + 
+    labs(y = "CDS m6A number",  x = NULL)
+ggsave(device = "pdf", "pics/Intronless gene CDS m6A number.pdf")
+```
+
+\FloatBarrier
+
+
+# log2FC upon STM 6h for the transcripts with different internal exon length
+
+```{r fig.height=5, fig.width=5}
+hg38_cds <- hg38[hg38$type == "CDS"]
+hg38_cds$exon_number <- as.numeric(hg38_cds$exon_number)
+hg38_cds <- hg38_cds %>% as.data.frame(.) %>% group_by(transcript_id) %>%
+    mutate(exon_max = max(exon_number))
+## filtering for the intrernal CDS
+hg38_cds_internal <- hg38_cds[which(hg38_cds$exon_number != 1 &
+                                  hg38_cds$exon_max != hg38_cds$exon_number),]
+## for each gene keep the longest annotated internal CDS
+hg38_cds_internal_longest <- hg38_cds_internal %>% group_by(gene_id) %>%
+    filter(width == max(width))
+    
+hg38_cds_internal_longest$bin_longest_inter_exon <- cut(hg38_cds_internal_longest$width,
+                                                        breaks = c(0,200,400,600,800,1000,Inf))
+da_stm_6h$bin_longest_inter_exon <- hg38_cds_internal_longest$bin_longest_inter_exon[
+    match(da_stm_6h$gene_id, hg38_cds_internal_longest$gene_id)
+]
+
+ggplot(da_stm_6h[!is.na(da_stm_6h$bin_longest_inter_exon),], 
+       aes(x = bin_longest_inter_exon, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "LFC upon STM6h", x = "The length of longest internal exon") + 
+    coord_cartesian(ylim = c(-1.5,1.5))
+ggsave(device = "pdf","pics/STM6h with exon length boxplot.pdf")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

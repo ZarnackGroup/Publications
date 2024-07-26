@@ -1,0 +1,1842 @@
+---
+title: "01 In vitro miCLIP"
+author: "You Zhou"
+date: "`r format(Sys.time(), '%B %e, %Y')`"
+output:
+  bookdown::pdf_document2:
+    keep_tex: yes
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: no
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    toc_collapsed: yes
+    fig_width: 8 
+    fig_height: 4 
+graphics: yes
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+geometry: margin=1in
+fontsize: 18pt
+---
+
+```{r knitr off, echo=FALSE, message=FALSE,cache=FALSE, results="hide", render=FALSE ,warning=FALSE}
+knitr::opts_chunk$set(echo=F, error=FALSE, warning=FALSE,message=FALSE, crop=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(xlsx)
+library(keras)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(dplyr)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(adabag)
+library(rtracklayer)
+library(Rsamtools)
+library(ranger)
+# library(tensorflow)
+# library(keras)
+# library(Rtsne)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#E41A1C"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black"),
+      axis.ticks.y = element_line(color = "black")))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = 1))
+update_geom_defaults("hline",   list(color = "#993404", size = 1))
+```
+
+# Introduction
+
+This rmarkdown collect all the analysis about the in vitro miCLIP data.
+
+------------------------------------------------------------------------
+
+# Oligo design
+We put the m6A sites at the 48, 50, 52, 54 and 56 position on the oligos, the plot below shown the 
+m6A position on the oligo.
+
+```{r}
+## load the m6A position information on oligos and make the plot
+df <- readRDS("rds/m6A_position_df.rds")
+ggplot(df, aes(x = Position, y = Number_m6A)) + geom_bar(stat = "identity") + 
+  ggtitle("The number of m6A sites in each position of the oligos") + 
+    labs(y = "Number of m6A",
+         x = "Position on the oligo")
+```
+
+```{r}
+ori_oligo <- 
+  readRDS("~/Desktop/Project/miCLIPs/In vitro/01 first glance/rds/full_table_with_position_natha_68.rds")
+ori_oligo_f <- ori_oligo %>% group_by(ID) %>% filter(row_number() == 1)
+
+number <- c()
+for (i in 1:(200-4)) {
+    sub_seq <- substring(ori_oligo_f$Oligos, i, i+4)
+    tmp <- length(sub_seq[grep("[GAT][GA]AC[ACTG]", sub_seq)])
+    number <- c(number, tmp)
+}
+
+df <- data.frame(Position = 1:(200-4),
+                 Number_DRACN = number)
+ggplot(df, aes(x = Position, y = Number_DRACN)) + geom_bar(stat = "identity") + 
+  ggtitle("The number of DRACN sites in each position of the oligos") + 
+    labs(y = "Number of DRACN motif",
+         x = "Position on the oligo")
+```
+
+\FloatBarrier
+
+# Data preprocessing
+
+After the sequencing, we received 11999 bw files for each replicates and condition. In total, we have 2 replicates and 7 conditions. So for making the downstream analysis easier, I first use a Rscript to convert all the bw files into a list object. Since only the negative control and methylated condition A are relevant to this paper, we decide to only focus on the samples from NC and A condition for the following analysis.
+
+```{r eval=FALSE, include=TRUE}
+############# It takes really long and need to run on the cluster ############# 
+
+## preprocess of the invitro data convert the bw into one list object
+
+## load library
+library(rtracklayer)
+library(GenomicRanges)
+library(BiocParallel)
+library(dplyr)
+
+## data path
+folders <- "/home/yzhou/Data/invitro_miclip/all_data/"
+
+## load data
+f <- list.files(folders)
+all.bw <- c()
+
+for(i in seq_len(length(f))){
+    n <- paste0(folders, f[[i]])
+    n2 <- list.files(n)
+    n3 <- grep(".bw", n2, value = TRUE)
+    k <- bplapply(n3, function(x){
+        ## always reload the package to avoid the error which introduce by reusing too many times 
+        ## of import.bw function
+        detach("package:rtracklayer", unload=TRUE)
+        library(rtracklayer)
+        bw.path <- paste0(n, "/", x)
+        ## Some bw files are empty, so I use try Catch to avoid the error
+        g <- tryCatch({import.bw(bw.path, as = "RleList")},
+                      error=function(e){
+                          return(RleList(Rle(values=rep(0, 200))))
+                      })
+        return(g)
+    }, 
+    ## use more cores to speed up the script
+    BPPARAM = MulticoreParam(workers = 16))
+    sample <- substr(n4, 23, nchar(n4)-8)
+    names(k) <- sample
+
+    all.bw <- c(all.bw, k)
+}
+
+saveRDS(all.bw, "/home/yzhou/Data/invitro_miclip/output/all_bw_rle_v2.rds")
+```
+
+
+\FloatBarrier
+
+# Differential analysis to identify the strength of invitro methylation for each nucleotides
+
+Since we randomly place the m6A in 5 position, I extract the signal of 141nt on the oligos and place the m6A sites on the 51nt. Then I filter for the oligo abundance, and use the filtered result to run the DESeq2 to identify the strength of in vitro methylation. The abundance threshold is `60`.
+
+```{r eval=FALSE, include=TRUE}
+
+## calculate the abundance of all oligos for the filtering step
+
+all_rle <- readRDS("~/Desktop/Data/invitro_miCLIP/all_bw_rle_v2.rds")
+## load the designed table
+# ori_oligo <- 
+#   readRDS("~/Desktop/Project/miCLIPs/In vitro/01 first glance/rds/full_table_with_position_natha_68.rds")
+ori_oligo$order <- 1:11999
+
+abundance <- lapply(all_rle, sum)
+names(abundance) <- names(all_rle)
+abundance <- abundance %>% unlist() %>% as.data.frame()
+## assign the ID as the rownames
+rownames(abundance) <- gsub("\\..*","", rownames(abundance))
+## extract the experiment type, we have miCLIP and RNAseq in this data
+abundance$experiment <- substr(rownames(abundance), 1,6)
+## extract the oligo ID for the miCLIP samples
+abundance$oligo_ID <- ifelse(abundance$experiment == "miCLIP", 
+                             getstr(rownames(abundance),initial.character = "_", 2, "_", 3),
+                             getstr(rownames(abundance),initial.character = "_", 3, "_", 4))
+colnames(abundance)[1] <- "Reads"
+abundance$oligo_ID <- as.numeric(abundance$oligo_ID)
+## assign the ID of original genome location for each oligo
+abundance$ID <- ori_oligo$ID[match(abundance$oligo_ID, ori_oligo$order)]
+## remove the barcode in the row name
+abundance$rowName <- substr(rownames(abundance), 1, nchar(rownames(abundance))-16)
+## sum the read number for each oligos
+all_abundance <- abundance %>% group_by(experiment, oligo_ID, ID) %>%
+  summarise(abundance = mean(Reads))
+saveRDS(all_abundance, "rds/all_abundance.rds")
+saveRDS(abundance, "rds/ori_abundance.rds")
+```
+
+```{r}
+## parameters
+threshold_abudance <- 60
+threshold_pvalue <- 0.05
+NC <- c("NC1", "NC2")
+A <- c("A1", "A2")
+```
+
+```{r eval=FALSE, include=TRUE}
+############# It takes really long and need to run on the cluster ############# 
+
+## Differential analysis for all oligos
+
+## load the truncation read counts
+all_rle <- readRDS("~/Desktop/Data/invitro_miCLIP/all_bw_rle_v2.rds")
+ori_abundance <- readRDS("~/Desktop/Project/miCLIPs/In vitro/01 first glance/rds/ori_abundance.rds")
+ori_abundance$rowName_full <- rownames(ori_abundance)
+## extract the oligos with the at least 60 reads
+ori_abundance_f <- ori_abundance[ori_abundance$Reads >= threshold_abudance,]
+ori_abundance_f <- ori_abundance_f[ori_abundance_f$experiment == "miCLIP",]
+ori_abundance_f$sample <- getstr(ori_abundance_f$rowName, "_", 1, "_", 2) 
+## keep only the samples in negative control and methylated A
+ori_abundance_f <- ori_abundance_f[ori_abundance_f$sample %in% c(NC, A),]
+
+## keep the rle for miCLIP NC and A 
+condition <- substr(names(all_rle), 1, 6)
+sample <- getstr(names(all_rle), "_", 1, "_", 2)
+
+all_rle_miCLIP <- all_rle[condition == "miCLIP"]
+all_rle_miCLIP <- all_rle_miCLIP[sample %in% c("NC1", "NC2", "A1", "A2")]
+
+## extract the oligo ID for the rle object
+sample_order_miCLIP <- names(all_rle_miCLIP) %>% 
+  substr(., nchar(.)-20, nchar(.)-16) %>% as.numeric()
+## extract the condition names
+n <- unique(substr(names(all_rle_miCLIP), 1, nchar(names(all_rle_miCLIP))-22))
+
+## position of m6A for different oligos
+g1 <- IRanges(14:154) # 64
+g2 <- IRanges(16:156) # 66
+g3 <- IRanges(18:158) # 68
+g4 <- IRanges(20:160) # 70
+g5 <- IRanges(22:162) # 72
+
+## split the rles based on the m6A position then extract the subset of rle
+## and extract 141nt window from the oligo which put the designed position at 51
+s64 <- all_rle_miCLIP[sample_order_miCLIP %in% ori_oligo$order[ori_oligo$m6A_position == 64]]
+s64 <- lapply(s64, function(x){x[[1]][g1]})
+  
+s66 <- all_rle_miCLIP[sample_order_miCLIP %in% ori_oligo$order[ori_oligo$m6A_position == 66]]
+s66 <- lapply(s66, function(x){x[[1]][g2]})
+  
+s68 <- all_rle_miCLIP[sample_order_miCLIP %in% ori_oligo$order[ori_oligo$m6A_position == 68]]
+s68 <- lapply(s68, function(x){x[[1]][g3]})
+  
+s70 <- all_rle_miCLIP[sample_order_miCLIP %in% ori_oligo$order[ori_oligo$m6A_position == 70]]
+s70 <- lapply(s70, function(x){x[[1]][g4]})
+  
+s72 <- all_rle_miCLIP[sample_order_miCLIP %in% ori_oligo$order[ori_oligo$m6A_position == 72]]
+s72 <- lapply(s72, function(x){x[[1]][g5]})
+  
+## combine the list
+all_rle_miCLIP_ex <- c(s64, s66, s68, s70, s72)
+
+## making GEO table
+saveRDS(all_rle_miCLIP_ex, "all_rle_miCLIP_ex.rds")
+df_out <- data.frame(Oligo_ID = names(all_rle_miCLIP_ex[1]))
+tmp2 <- as.data.frame(all_rle_miCLIP_ex[1]) %>% t()
+df_out <- cbind(df_out,tmp2)
+
+for (i in 2:length(all_rle_miCLIP_ex)) {
+    tmp <- data.frame(Oligo_ID = names(all_rle_miCLIP_ex[i]))
+    tmp2 <- as.data.frame(all_rle_miCLIP_ex[i]) %>% t()
+    tmp <- cbind(tmp,tmp2)
+    df_out <- rbind(df_out,tmp)
+}
+saveRDS(df_out, "count.rds")
+count_geo <- readRDS("count.rds")
+count_geo$condition <- getstr(count_geo$Oligo_ID,"_",1,"_",2)
+count_geo$condition[grep("NC1",count_geo$condition)] <- "Control_1"
+count_geo$condition[grep("NC2",count_geo$condition)] <- "Control_2"
+count_geo$condition[grep("A1",count_geo$condition)] <- "Methylated_1"
+count_geo$condition[grep("A2",count_geo$condition)] <- "Methylated_2"
+
+count_geo$order <- count_geo$Oligo_ID %>% substr(., nchar(.)-20, nchar(.)-16) %>% as.numeric()
+count_geo$designed_group <- ori_oligo$Group[match(count_geo$order, ori_oligo$order)]
+count_geo$designed_group[count_geo$designed_group %in% 
+    c("ClinVar overlaped", "high confident m6A", "non DRACH m6A", "strong_GGACT",
+      "Ultimate GGACT", "validated", "weak_GGACT")] <- "m6A"
+count_geo$designed_group[count_geo$designed_group %in% 
+    c("no signal DRACH", "non m6A DRACH")] <- "Unmethylated DRACN"
+count_geo$designed_group[count_geo$designed_group %in% 
+    c("bulge 1nt", "bulge 2nt", "Mutation", "SOCS2-nativ", "SOCS2-ohne weitere RRACH",
+      "tetraloop")] <- "Others"
+count_geo$genomic_coordinates <- ori_oligo$ID[match(count_geo$order,ori_oligo$order)]
+
+s1 <- ori_oligo[ori_oligo$m6A_position == 64, ] %>% as.data.frame() %>%
+  mutate(deseq2_seq = substr(.$Oligos, 14, 154))
+s2 <- ori_oligo[ori_oligo$m6A_position == 66, ] %>% as.data.frame() %>%
+  mutate(deseq2_seq = substr(.$Oligos, 16, 156))
+s3 <- ori_oligo[ori_oligo$m6A_position == 68, ] %>% as.data.frame() %>%
+  mutate(deseq2_seq = substr(.$Oligos, 18, 158))
+s4 <- ori_oligo[ori_oligo$m6A_position == 70, ] %>% as.data.frame() %>%
+  mutate(deseq2_seq = substr(.$Oligos, 20, 160))
+s5 <- ori_oligo[ori_oligo$m6A_position == 72, ] %>% as.data.frame() %>%
+  mutate(deseq2_seq = substr(.$Oligos, 22, 162))
+
+ori_oligo_f <- rbind(s1,s2,s3,s4,s5) %>% arrange(order)
+count_geo$sequence <- ori_oligo_f$deseq2_seq[match(count_geo$order, ori_oligo_f$order)]
+count_geo <- count_geo[c(1,143:147,2:142)]
+count_geo$order <- NULL
+write.table(count_geo[order(count_geo$Oligo_ID),], 
+            file = "In vitro miCLIP2 counting table.txt", sep = "\t",
+            row.names = FALSE)
+write.csv(count_geo[order(count_geo$Oligo_ID),], 
+          file = "In vitro miCLIP2 counting table.csv",
+            row.names = FALSE)
+#####
+
+## extract the rles with at least 60 reads
+all_rle_miCLIP_ex_f <- 
+  all_rle_miCLIP_ex[names(all_rle_miCLIP_ex) %in% ori_abundance_f$rowName_full]
+
+sample_order_miCLIP <- names(all_rle_miCLIP_ex_f) %>% 
+  substr(., nchar(.)-20, nchar(.)-16) %>% as.numeric()
+
+## to run the DESeq2 for oligos with the sequences
+full_list <- list()
+j <- 1
+oligo_f <- unique(ori_oligo$ID[ori_oligo$order %in% sample_order_miCLIP])
+
+for(g in oligo_f){
+  x <- g
+  subset_1 <- ori_oligo$order[ori_oligo$ID == x]
+  subset_rle <- all_rle_miCLIP_ex_f[sample_order_miCLIP %in% subset_1]
+  ## since there are some oligos do not have enough data to run the DEseq, here I use the tryCatch
+  d <- tryCatch({
+    l <- list()
+    for (i in 1:length(subset_rle)) {
+        ## re-assign all the position to 1 to 141
+      l[[i]] <- subset_rle[[i]] %>% as.data.frame() %>% mutate(position = 1:141) %>%
+        mutate(reads = value) %>% select(-value)
+      names(l)[i] <- names(subset_rle)[i]
+    }
+    df <- l[[1]]
+    for (i in 2:length(l)) {
+         df <- left_join(df, l[[i]], by = "position")
+    }
+    colnames(df)[2:ncol(df)] <- getstr(names(l), "_",1,"_",3)
+    rownames(df) <- as.character(df$position)
+    df$position <- NULL
+    condition_deseq <- data.frame(condition = 
+                                  getstr(names(l), "_",1,"_",2) %>% substr(.,1, nchar(.)-1))
+
+    dds <- DESeqDataSetFromMatrix(countData = df,
+                                  colData = condition_deseq,
+                                  design = ~ condition)
+    dds$condition <- factor(condition_deseq$condition, level = c("A", "NC"))
+      
+    dds <- DESeq(dds)
+    res <- lfcShrink(dds, contrast=c("condition","A","NC"), type="normal") %>%
+      as.data.frame()
+    return(res)
+    },
+    error = function(msg){
+      message(paste0(msg,"\n"))
+      return(NA)
+    })
+  full_list[[j]] <- d
+  names(full_list)[[j]] <- g
+  j <- j + 1
+}  
+saveRDS("rds/full_list_DESeq2.rds")  
+```
+
+```{r eval=FALSE, include=TRUE}
+## read data and define 5mers
+ori_oligo <- 
+  readRDS("~/Desktop/Project/miCLIPs/In vitro/01 first glance/rds/full_table_with_position_natha_68.rds")
+ori_oligo$kmer5 <- "0"
+Hek_miCLIP_peaks <- readRDS("rds/Hek_m6A.rds")
+nathalie.67 <- read.xlsx2("/Users/codezy/Desktop/Data/in vitra miCLIP library/Constructs for miCLIP.xlsx", sheetIndex = 1)
+
+Hek_miCLIP_peaks$ID <- paste0(seqnames(Hek_miCLIP_peaks), ":", start(Hek_miCLIP_peaks), ",",
+                         strand(Hek_miCLIP_peaks))
+ori_oligo$kmer5 <- Hek_miCLIP_peaks$Kmer5[match(ori_oligo$ID, Hek_miCLIP_peaks$ID)]
+
+## since 5mers of the Permuation and no signal DRACH oligos can not be found in the Hek_miCLIP_peaks
+## here I process them seperately
+k <- ori_oligo[ori_oligo$Group == "Permutation",]
+## extract the 5mer from the oligo ID
+ori_oligo$kmer5[ori_oligo$Group == "Permutation"] <-
+    substr(k$ID, nchar(k$ID)-4, nchar(k$ID))
+ns_DRACH <- ori_oligo[ori_oligo$Group == "no signal DRACH",]
+## make the grange object for no signal DRACH oligos for checking the 5mers
+df <- data.frame(seqnames = gsub("\\:.*","", ns_DRACH$ID),
+                 start = getstr(ns_DRACH$ID, ":",1,",",1),
+                 end = getstr(ns_DRACH$ID, ":",1,",",1),
+                 strand = substr(ns_DRACH$ID, nchar(ns_DRACH$ID), 
+                                 nchar(ns_DRACH$ID)),
+                 ID = ns_DRACH$ID) %>%
+  makeGRangesFromDataFrame(.,keep.extra.columns = TRUE)
+seq <- getSeq(Hsapiens, df+2)
+df$kmer5 <- seq
+ori_oligo$kmer5[ori_oligo$Group == "no signal DRACH"] <-
+  df$kmer5[match(df$ID, ori_oligo$ID[ori_oligo$Group == "no signal DRACH"])]
+
+## extract the 5mers for nathalies sample
+ori_oligo$kmer5[ori_oligo$Group %in% nathalie.67$type] <-
+  substr(ori_oligo$Oligos[ori_oligo$Group %in% nathalie.67$type], 66, 70)
+
+ori_oligo$kmer5 <- str_replace(ori_oligo$kmer5, "U", "T")
+saveRDS(ori_oligo,"rds/ori_oligo_5mer.rds")
+```
+
+```{r}
+ori_abundance <- readRDS("~/Desktop/Project/miCLIPs/In vitro/01 first glance/rds/ori_abundance.rds")
+ori_abundance$rowName_full <- rownames(ori_abundance)
+nathalie.67 <- readxl::read_xlsx("/Users/codezy/Desktop/Data/in vitra miCLIP library/Constructs for miCLIP.xlsx") 
+
+log2FC_DESeq2 <- readRDS("rds/full_list_DESeq2.rds")
+ori_oligo <- readRDS("rds/ori_oligo_5mer.rds")
+ori_oligo_unique <- ori_oligo %>% mutate(order = 1:11999) %>%
+  group_by(ID) %>% filter(order == min(order))
+
+
+## extract the log2FC at the designed position
+log2FC_m6A <- lapply(log2FC_DESeq2, function(x){
+  out <- tryCatch({
+    x$log2FoldChange[51]
+  },
+  error = function(e){return(NA)})
+  return(out)
+}) %>% unlist() %>% as.data.frame()
+
+log2FC_m6A$ID <- rownames(log2FC_m6A)
+colnames(log2FC_m6A)[1] <- "log2FC"
+log2FC_m6A$design <- ori_oligo$Group[match(log2FC_m6A$ID, ori_oligo$ID)]
+log2FC_m6A$kmer5 <- ori_oligo$kmer5[match(log2FC_m6A$ID, ori_oligo$ID)]
+log2FC_m6A$kmer5 <- str_replace(log2FC_m6A$kmer5, "U" , "T")
+```
+
+## Overview of the differential result
+
+```{r fig1a,fig.width=8, fig.height=4, fig.pos="h", fig.cap="The overview of DESeq2 results."}
+df <- data.frame(Number = c(nrow(ori_oligo_unique[!ori_oligo_unique$ID %in% log2FC_m6A$ID,]),
+                            nrow(log2FC_m6A),
+                            nrow(ori_oligo_unique), 
+                            sum(is.na(log2FC_m6A$log2FC))),
+                 Group = c("Low abundant oligos", "Oligos with enough reads",
+                           "All designed oligos", "Designed DRACH sites don't have result"))
+df$Group <- factor(df$Group, 
+                   levels = c("All designed oligos", "Low abundant oligos", 
+                              "Oligos with enough reads", "Designed DRACH sites don't have result"))
+
+ggplot(df, aes(x = Group,y = Number, label = Number)) + 
+  geom_col(fill = m6A_color) + geom_label() +
+  ggtitle("The overview of DESeq2 results") + 
+  labs(x = NULL) 
+
+```
+
+## log2FC of Designed DRACH sites and downstream A sites
+
+To further confirm that there is a difference at the Designed DRACH sites between NC and A, here I extract the first A sites downstream of the design window as a comparison.
+
+```{r}
+## extract the downstream sequence
+s1 <- ori_oligo_unique[ori_oligo_unique$m6A_position == 64, ] %>% as.data.frame() %>%
+  mutate(sub_seq = substr(.$Oligos, 14+51, 154)) %>% 
+  mutate(deseq2_seq = substr(.$Oligos, 14, 154))
+s2 <- ori_oligo_unique[ori_oligo_unique$m6A_position == 66, ] %>% as.data.frame() %>%
+  mutate(sub_seq = substr(.$Oligos, 16+51, 156)) %>% 
+  mutate(deseq2_seq = substr(.$Oligos, 16, 156))
+s3 <- ori_oligo_unique[ori_oligo_unique$m6A_position == 68, ] %>% as.data.frame() %>%
+  mutate(sub_seq = substr(.$Oligos, 18+51, 158)) %>% 
+  mutate(deseq2_seq = substr(.$Oligos, 18, 158))
+s4 <- ori_oligo_unique[ori_oligo_unique$m6A_position == 70, ] %>% as.data.frame() %>%
+  mutate(sub_seq = substr(.$Oligos, 20+51, 160)) %>% 
+  mutate(deseq2_seq = substr(.$Oligos, 20, 160))
+s5 <- ori_oligo_unique[ori_oligo_unique$m6A_position == 72, ] %>% as.data.frame() %>%
+  mutate(sub_seq = substr(.$Oligos, 22+51, 162)) %>% 
+  mutate(deseq2_seq = substr(.$Oligos, 22, 162))
+
+ori_oligo_unique <- rbind(s1,s2,s3,s4,s5) %>% arrange(order)
+ori_oligo_unique$deseq2_seq <- chartr("U", "T", ori_oligo_unique$deseq2_seq)
+
+## find out the position of first downstream A
+ori_oligo_unique$downstream_A <- lapply(ori_oligo_unique$sub_seq, 
+                                        function(x){gregexpr("A", x)[[1]][1]}) %>%
+  unlist()
+ori_oligo_unique$downstream_A <- ori_oligo_unique$downstream_A + 51
+ori_oligo_unique$downstream_A_kmer5 <-  
+    substring(ori_oligo_unique$sub_seq, ori_oligo_unique$downstream_A-51-2,
+              ori_oligo_unique$downstream_A-51+2)
+
+## extract the downstream A log2FC 
+j = 2
+k <- names(log2FC_DESeq2)[1]
+df <- log2FC_DESeq2[names(log2FC_DESeq2) == k][[1]]
+log2FC_DESeq2_downstream_A <- data.frame(ID = k,
+    log2FC = df$log2FoldChange[ori_oligo_unique$downstream_A[match(k, ori_oligo_unique$ID)]],
+    kmer5 = ori_oligo_unique$downstream_A_kmer5[match(k, ori_oligo_unique$ID)])
+
+for (i in names(log2FC_DESeq2)[-1]) {
+  df <- log2FC_DESeq2[names(log2FC_DESeq2) == i][[1]]
+  
+  log2FC_DESeq2_downstream_A[j,] <- tryCatch({
+    c(i, df$log2FoldChange[ori_oligo_unique$downstream_A[match(i, ori_oligo_unique$ID)]],
+      ori_oligo_unique$downstream_A_kmer5[match(i, ori_oligo_unique$ID)])
+  },
+  error = function(e){return(c(NA,NA,NA))})
+  j <- j+1
+}
+## remove DRACN
+log2FC_DESeq2_downstream_A <- log2FC_DESeq2_downstream_A[!grepl("[GAT][GA]AC[ATCG]",
+                                                               log2FC_DESeq2_downstream_A$kmer5),]
+
+log2FC_m6A$downstream_A_log2FC <- 
+  log2FC_DESeq2_downstream_A$log2FC[match(log2FC_m6A$ID, log2FC_DESeq2_downstream_A$ID)]
+```
+
+```{r}
+my_comparisons <- list(c("Designed DRACN", "Downstream A"))
+df <- data.frame(log2FC = as.numeric(c(log2FC_m6A$log2FC, log2FC_m6A$downstream_A_log2FC)),
+           Group = c(rep("Designed DRACN", nrow(log2FC_m6A)),
+                     rep("Downstream A", nrow(log2FC_m6A))))
+
+ggplot(na.omit(df), aes(x = Group, y = log2FC)) + 
+  geom_boxplot(outlier.shape = NA, fill = m6A_color) + 
+  geom_hline(yintercept = 0, linetype = 2) + 
+  ggtitle("The comparison between Designed DRACN sites and downstream A sites") +
+  labs(y = "Fold Change NC vs A (log2 scale)",
+       x = NULL) + 
+  coord_cartesian(ylim = c(-1.5,3)) + 
+  stat_compare_means(comparisons = my_comparisons, label.y = 2.2,
+                     method = "wilcox.test")
+```
+
+
+\FloatBarrier
+
+# The log2FC for differnt 5mers
+
+After confirm that the Designed DRACN sites show difference between NC and A, here I will try to estimate the methylation levels for all DRACN 5mers. For the estimation, the oligos which belongs to `"high confident m6A", "no signal DRACH", "non m6A DRACH", "non DRACH m6A" and "Ultimate GGACT"` are used.
+
+```{r fig2a,fig.width=8, fig.height=8, fig.pos="h", fig.cap="The methylation level for DRACH 5mers."}
+## the order of DRACN 5mers based on the abundance of the 5mer
+log2FC_m6A_sub <- log2FC_m6A[log2FC_m6A$design %in% c("high confident m6A", 
+                                                      "no signal DRACH", 
+                                                      "non m6A DRACH", 
+                                                      "Ultimate GGACT",
+                                                      "non DRACH m6A"),]
+## order the plot with the abundance of sites
+tmp <- table(log2FC_m6A_sub$kmer5)
+order <- names(tmp[order(tmp,decreasing = TRUE)])
+log2FC_m6A_sub$kmer5 <- factor(log2FC_m6A_sub$kmer5, 
+                               levels = order)
+
+p1 <- ggplot(log2FC_m6A_sub, aes(y = log2FC, x = kmer5)) + 
+         geom_boxplot(outlier.shape = NA, fill = m6A_color) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(y = "Fold Change NC vs A (log2 scale)",
+       x = NULL) +
+  geom_hline(yintercept = 0, linetype = 2)
+p2 <- ggplot(log2FC_m6A_sub, aes(x = kmer5)) + 
+  geom_bar(fill = m6A_color) +
+  geom_text(stat='count', aes(label=..count..), size = 5) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = NULL)
+
+p1/p2
+```
+
+
+\FloatBarrier
+
+# The 5mers at designed position with the strongest log2 fold change
+
+In this section, I will show more details for the Designed  sites which have the largest log2FC in vitro.
+
+```{r}
+top200 <- log2FC_m6A %>% slice_max(order_by = log2FC, n = 200)
+k <- table(top200$kmer5)
+df <- k[order(k, decreasing = TRUE)] %>% as.data.frame()
+a <- ifelse(substr(df$Var1,1 ,4) == "GGAC", "red", "black")
+df %>%
+  ggplot(., aes(x = Var1,y = Freq, label = Freq)) + 
+  geom_col(fill = m6A_color) + 
+  geom_label() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = a)) + 
+  labs(x = NULL, y = "Number") + 
+  ggtitle("The frequency of 5mers in the top 200 (fold change) m6A sites in vitro") %>%
+    suppressWarnings()
+```
+
+```{r}
+k <- k[order(k, decreasing = TRUE)] %>% as.data.frame() 
+k2 <- table(log2FC_m6A$kmer5) %>% as.data.frame()
+k <- right_join(k,k2, "Var1")
+k[is.na(k)] <- 0
+colnames(k) <- c("kmer5", "Top200", "all")
+k$fraction <- k$Top200/k$all 
+ggplot(k, aes(x = kmer5, y = fraction, label = round(fraction,3))) + 
+  geom_col(fill = m6A_color) +
+  geom_text(size = 2.5)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ 
+  ggtitle("The fraction of 5mers in the top 200 (fold change) m6A sites in vitro") + 
+  labs(y = "Fraction", x = NULL)
+```
+
+
+\FloatBarrier
+
+# Permutation indicates the 5mer itself influence the methylation level
+
+The higher 5mer represent the 5mer which have a high frequency in HEK m6A sites. The lower 5mer are the 5mers with low abundance in HEK m6A sites.
+
+```ruby
+lower_5mer <- c("AGACT", "TGACT", "GAACC", "AAACC", "TAACC")       
+higher_5mer <- c("GGACT", "GGACA", "GAACT")
+```
+
+```{r}
+Permutation <- log2FC_m6A[log2FC_m6A$design == "Permutation",]
+Permutation$mutation <- substr(Permutation$ID, 
+                               nchar(Permutation$ID)-4, nchar(Permutation$ID))
+Permutation$ori <- substr(Permutation$ID, 1, nchar(Permutation$ID)-6)
+Permutation$ori_log2FC_NA_A <- log2FC_m6A$log2FC[match(Permutation$ori, 
+                                                            log2FC_m6A$ID)]
+Permutation$log2FC_dif <- Permutation$log2FC - Permutation$ori_log2FC_NA_A
+## 
+lower_5mer <- c("AGACT", "TGACT", "GAACC", "AAACC", "TAACC")
+higher_5mer <- c("GGACT", "GGACA", "GAACT")
+Permutation$to <- ifelse(Permutation$mutation %in% higher_5mer, "to high 5mers", "to low 5mers")
+
+Permutation_2_high <- Permutation[Permutation$mutation %in% higher_5mer,]
+Permutation_2_low <- Permutation[Permutation$mutation %in% lower_5mer,]
+my_comparisons <- list(c("to high 5mers", "to low 5mers"))
+
+ggplot(Permutation, aes(x = to, y = log2FC_dif)) + 
+  geom_boxplot(outlier.shape = NA, fill = m6A_color) +
+  labs(y = "Difference of log2FC NC vs A",
+       x = "Permutation to") +
+  geom_hline(yintercept = 0, linetype = 2, color = DRACH_color) + 
+  ggtitle("The difference of log2FC after permutation") + 
+    stat_compare_means(comparisons = my_comparisons, method = "wilcox.test",
+                       label.y = 2.2)
+```
+
+```{r fig.height=8, fig.width=8}
+Permutation$mutation <- factor(Permutation$mutation, 
+                            levels = c("GGACT", "GGACA", "GAACT", "AGACT", "TGACT", "GAACC", 
+                                       "AAACC", "TAACC")) 
+p1 <- ggplot(Permutation, aes(x = mutation, y = log2FC_dif)) + 
+  geom_boxplot(outlier.shape = NA, fill = m6A_color) + 
+  geom_hline(yintercept = 0, linetype = 2, color = DRACH_color) + 
+  geom_vline(xintercept = 3.5, linetype = 1, color = UTR3_color)+
+  geom_dotplot(binaxis='y', stackdir='center',
+               stackratio=1.5, dotsize=0.5, fill = "black")+
+  labs(y = "Difference of log2FC NC vs A",
+       title = "The difference of log2FC after permutation") 
+
+p2 <- ggplot(Permutation, aes(x = mutation, y = log2FC_dif)) + 
+  geom_boxplot(outlier.shape = NA, fill = m6A_color)  + 
+  geom_hline(yintercept = 0, linetype = 2, color = DRACH_color) + 
+  geom_vline(xintercept = 3.5, linetype = 1, color = UTR3_color) + 
+  geom_line(aes(group = ori), linetype = 2, color = "black", alpha = 0.7) +
+  labs(y = "Difference of log2FC NC vs A",
+       title = "The difference of log2FC after permutation")
+p1/p2
+```
+
+
+\FloatBarrier
+
+# Downstream DRACH
+
+In our oligos, we have about `3.6` DRACH per oligo which means besides the Designed DRACH sites we still have some other sites potentially have the chance to be methylated. In this section, I will investigate the DRACH sites downstream of our Designed DRACH sites to check whether they also receive regulation from the in vitro methylation.
+
+```{r}
+## extract all the DRACH and GGACG position in down stream of designed position
+downstream_DRACN <- lapply(ori_oligo_unique$sub_seq, 
+  function(x){gregexpr("[ATG][GA][A][C][ATCG]", x)[[1]][
+    1:length(gregexpr("[ATG][GA][A][C][ATCG]", x)[[1]])]})
+
+names(downstream_DRACN) <- ori_oligo_unique$ID
+
+## 1 and 2 is empty so start with 3rd for the DRACH sites
+k <- names(log2FC_DESeq2)[3]
+df <- log2FC_DESeq2[names(log2FC_DESeq2) == k][[1]]
+seq <- ori_oligo_unique$sub_seq[ori_oligo_unique$ID == k]
+
+## 51 is the position of so we should always use the downstream position to +51. Since the downstream 
+## position is the position of the beginning of DRACH, we should also +2 to find out the log2FC 
+## on A within the DRACN in the DESeq2 result table
+log2FC_DESeq2_downstream_DRACN <- data.frame(ID = k,
+    log2FC = df$log2FoldChange[downstream_DRACN[match(k, names(downstream_DRACN))][[1]]+51+2],
+    Position = downstream_DRACN[match(k, names(downstream_DRACN))][[1]]+51+2,
+    kmer5 = lapply(as.list(downstream_DRACN[match(k, names(downstream_DRACN))][[1]]), 
+                   function(x){substr(seq, x, x+4)}) %>% unlist())
+
+for (i in names(log2FC_DESeq2)[-c(1,2,3)]) {
+  df <- log2FC_DESeq2[names(log2FC_DESeq2) == i][[1]]
+  seq <- ori_oligo_unique$sub_seq[ori_oligo_unique$ID == i]
+  df2 <- tryCatch({data.frame(ID = i,
+    log2FC = df$log2FoldChange[downstream_DRACN[match(i, names(downstream_DRACN))][[1]]+51+2],
+    Position = downstream_DRACN[match(i, names(downstream_DRACN))][[1]]+51+2,
+    kmer5 = lapply(as.list(downstream_DRACN[match(i, names(downstream_DRACN))][[1]]), 
+                   function(x){substr(seq, x, x+4)}) %>% unlist())},
+    error = function(e){data.frame(ID = i, log2FC = NA, Position = NA, kmer5 = NA)})
+  log2FC_DESeq2_downstream_DRACN <- rbind(log2FC_DESeq2_downstream_DRACN, df2)
+}
+## remove the -1 which means no DRACH at downstream oligos
+log2FC_DESeq2_downstream_DRACN <- 
+  log2FC_DESeq2_downstream_DRACN[log2FC_DESeq2_downstream_DRACN$Position != 52,]
+```
+
+```{r}
+df <- data.frame(Number = c(nrow(log2FC_DESeq2_downstream_DRACN),
+                            sum(is.na(log2FC_DESeq2_downstream_DRACN$log2FC))),
+                 Group = c("All downstream DRACN", "without signal"))
+ggplot(df, aes(x = Group, y = Number, label = Number)) + 
+  geom_col() + 
+  geom_label() + 
+  labs(x = NULL) + 
+  ggtitle("Number of downstream DRACN sites")
+```
+
+For comparison, I use the same m6A sites that I use to estimate the methylation level in vitro in the first section and their downstream A sites.
+
+```{r}
+log2FC_DESeq2_downstream_DRACN_f <- na.omit(log2FC_DESeq2_downstream_DRACN)
+log2FC_m6A_f <- log2FC_m6A[log2FC_m6A$design %in% c("high confident m6A", 
+                                                      "Ultimate GGACT",
+                                                      "non DRACH m6A"),]
+log2FC_m6A_f2 <- log2FC_m6A[log2FC_m6A$design %in% c("no signal DRACH", 
+                                                      "non m6A DRACH"),]
+
+df <- data.frame(log2FC = log2FC_DESeq2_downstream_DRACN_f$log2FC,
+                 group = "Downstream DRACN")
+df2 <- data.frame(log2FC = log2FC_m6A_f$log2FC,
+                 group = "m6A")
+df3 <- data.frame(log2FC = log2FC_m6A_f$downstream_A_log2FC,
+                 group = "Downstream A")
+df4 <- data.frame(log2FC = log2FC_m6A_f2$log2FC,
+                 group = "Unmodified DRACN")
+df <- rbind(df, df2, df3, df4)
+df$log2FC <- as.numeric(df$log2FC)
+m <- median(df$log2FC[df$group == "Downstream DRACN"])
+
+my_comparisons <- list( c("m6A", "Downstream A"), 
+                        c("Downstream A", "Downstream DRACN"),
+                        c("Downstream A", "Unmodified DRACN"))
+df$group <- factor(df$group, levels = c("m6A", "Unmodified DRACN",
+                                        "Downstream DRACN","Downstream A")) 
+
+ggplot(df, aes(x = group, y = log2FC)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  ggtitle("The log2FC comparison") + 
+  labs(x = NULL, y = "Fold Change NC vs A (log2 scale)") + 
+  stat_compare_means(comparisons = my_comparisons, label.y = c(2.6,2.2,2.4),
+                     method = "wilcox.test") + 
+    coord_cartesian(ylim = c(-1.2,4)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r fig4a,fig.width=8, fig.height=7, fig.pos="h", fig.cap="The comparison between designed sites and downstream DRACN"}
+order_new <- table(log2FC_DESeq2_downstream_DRACN_f$kmer5)
+order_new <- order_new[order(order_new, decreasing = T)]
+
+log2FC_DESeq2_downstream_DRACN_f$kmer5 <- factor(log2FC_DESeq2_downstream_DRACN_f$kmer5,
+                                                 levels = names(order_new))
+df <- data.frame(ID = "A", log2FC = log2FC_m6A_f$log2FC, Position = "A", 
+                 kmer5 = log2FC_m6A_f$kmer5, 
+                 group = "Designed sites")
+df2 <- log2FC_DESeq2_downstream_DRACN_f %>% mutate(group = "Downstream DRACN")
+
+df <- rbind(df, df2)
+# df <- df[df$kmer5 != "GAACG",]
+## find out the right order for the boxplot
+tmp <- df[df$group == "Designed sites",]
+tmp <- tmp %>% group_by(kmer5) %>% summarise(median = median(log2FC, na.rm = T))
+tmp <- tmp[order(tmp$median, decreasing = T),]
+
+## remove 5mers in downstream DRACN which do not exist in design sites
+df_f <- df[df$kmer5 %in% tmp$kmer5,]
+df_f$kmer5 <- factor(df_f$kmer5, levels = tmp$kmer5)
+
+p1 <- ggplot(df_f, aes(x = kmer5, y = log2FC, fill = group)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        legend.position = "top")+
+  labs(x = NULL, y ="Fold Change NC vs A (log2 scale)", fill = "Sites") + 
+  ggtitle("The log2FC of downstream DRACN and designed sites") + 
+  coord_cartesian(ylim = c(-2,4)) + 
+  geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_manual(values = c(DRACH_color, down_color))
+p2 <- ggplot(df_f, aes(x = kmer5, fill = group)) + 
+  geom_bar(position = "dodge") + 
+  geom_text(stat='count', aes(label=..count..), size = 4, position = position_dodge(width = .9)) + 
+  ggtitle("Number of 5mers") + 
+  theme(legend.position = "top", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x = NULL, y = "Count")  +
+    scale_fill_manual(values = c(DRACH_color, down_color))
+p1/p2
+```
+
+\FloatBarrier
+
+# The strongest up regulated sites on oligos
+
+Since the downstream DRACN sites shows a similar log2 fold change upon in vitro methylation to the designed DRACN sites, I do believe the effect of in vitro methylation is not only at the designed DRACN sites but also the rest place on the oligos. Therefore, in this section, I will check out the position that receive the strongest up regulation upon the in vitro methylation.
+
+For each oligos, I extract the top 5 position with log2FC \> 1 and smallest p-value. To be noticed, here I use the `p-value` without multiple test correction, since the `padj` are commonly equal to `0.9970317` due to the low read count.
+
+As the plot down below shown, the `GG` is the most important element for the m6A deposition. Besides, the DRACH 5mers have higher frequency in the result compare to other motif that indicates the success of the in vitro library.
+
+```{r eval=FALSE, include=TRUE}
+k <- names(log2FC_DESeq2)[[1]]
+seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == k]
+df <- log2FC_DESeq2[names(log2FC_DESeq2) == k][[1]] %>% 
+  mutate(position = 1:141) %>% as.data.frame() %>%
+  filter(log2FoldChange > 1) %>% 
+  slice_min(pvalue, n = 5) %>%
+  mutate(ID = k) 
+## assign the 5mer and sequence information to the strongest regulated sites in each oligo
+df$kmer5 <- lapply(df$position, function(x){
+  substr(seq, x-2, x+2)
+}) %>% unlist()
+df$seq <- lapply(df$position, function(x){
+  substr(seq, x, x)
+}) %>% unlist()
+
+## extract the significant up regulated sites
+for (i in names(log2FC_DESeq2)[-1]) {
+  seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == i]
+  df2 <- tryCatch({
+    log2FC_DESeq2[names(log2FC_DESeq2) == i][[1]] %>% 
+      mutate(position = 1:141) %>% as.data.frame() %>%
+      filter(log2FoldChange > 1) %>% 
+      slice_min(pvalue, n = 5) %>%
+      mutate(ID = i) %>% 
+      mutate(kmer5 = lapply(.$position, function(x){
+        substr(seq, x-2, x+2)
+        }) %>% unlist()) %>% 
+      mutate(seq = lapply(.$position, function(x){
+        substr(seq, x, x)}) %>% unlist())
+  },
+  error = function(e){ 
+    data.frame(baseMean = NA, log2FoldChange = NA, lfcSE = NA, stat = NA, pvalue = NA, 
+               padj = NA, position = NA, ID = i, seq = NA, kmer5 = NA)})
+  df <- rbind(df, df2)
+}
+top_log2FC <- df
+top_log2FC <- top_log2FC[!is.na(top_log2FC$seq),]
+saveRDS(top_log2FC,"rds/top_log2FC.rds")
+```
+
+
+```{r}
+top_log2FC <- readRDS("rds/top_log2FC.rds")
+k <- table(top_log2FC$kmer5)
+df <- k[order(k, decreasing = TRUE)][1:40] %>% as.data.frame()
+df$drach <- "no"
+df$drach[grep("[ATG][AG][A][C][ATCG]", df$Var1)] <- "yes"
+a <- ifelse(df$drach == "yes", "red", "black")
+
+ggplot(df, aes(x = Var1, y = Freq)) + 
+  geom_bar(stat = "identity") +
+  ggtitle("The frequecy of the 5mer in the most up regulated sites") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,  color = a)) +
+  labs(x = NULL, y = "Count")
+```
+
+```{r eval=FALSE, include=FALSE}
+## table for scatter for median of LFC and mean
+k <- names(log2FC_DESeq2)[[1]]
+seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == k]
+df <- log2FC_DESeq2[names(log2FC_DESeq2) == k][[1]] %>% 
+  mutate(position = 1:141) %>% as.data.frame() %>%
+  mutate(ID = k) 
+## assign the 5mer and sequence information to the strongest regulated sites in each oligo
+df$kmer5 <- lapply(df$position, function(x){
+  substr(seq, x-2, x+2)
+}) %>% unlist()
+df$seq <- lapply(df$position, function(x){
+  substr(seq, x, x)
+}) %>% unlist()
+
+## extract the significant up regulated sites
+for (i in names(log2FC_DESeq2)[-1]) {
+  seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == i]
+  df2 <- tryCatch({
+    log2FC_DESeq2[names(log2FC_DESeq2) == i][[1]] %>% 
+      mutate(position = 1:141) %>% as.data.frame() %>%
+      mutate(ID = i) %>% 
+      mutate(kmer5 = lapply(.$position, function(x){
+        substr(seq, x-2, x+2)
+        }) %>% unlist()) %>% 
+      mutate(seq = lapply(.$position, function(x){
+        substr(seq, x, x)}) %>% unlist())
+  },
+  error = function(e){ 
+    data.frame(baseMean = NA, log2FoldChange = NA, lfcSE = NA, stat = NA, pvalue = NA, 
+               padj = NA, position = NA, ID = i, seq = NA, kmer5 = NA)})
+  df <- rbind(df, df2)
+}
+
+df <- df[!is.na(df$seq),]
+df$nchar <- nchar(df$kmer5)
+df_f <- df[which(df$nchar == 5), ]
+df_2 <- df_f %>% group_by(kmer5) %>% summarise(median_lfc = median(log2FoldChange, na.rm = T),
+                                               median_baseMean = median(baseMean, na.rm = T))
+saveRDS(df_2, "rds/log2FC_all_5mers.rds")
+```
+
+```{r fig.height=3, fig.width=3}
+df_all_lfc <- readRDS("rds/log2FC_all_5mers.rds")
+df_all_lfc$DRACH <- ifelse(grepl("[GAT][GA]AC[TACG]", df_all_lfc$kmer5), 
+                           "DRACN", "Other")
+df_all_lfc$kmer4 <- substr(df_all_lfc$kmer5, 1, 4)
+df_all_lfc$DRACH[df_all_lfc$kmer4 == "GGAC"] <- "GGAC"
+
+df_all_lfc <- df_all_lfc[order(df_all_lfc$median_lfc, decreasing = T),]
+df_all_lfc$label <- 1:nrow(df_all_lfc)
+df_all_lfc$label <- ifelse(df_all_lfc$label <= 4, df_all_lfc$kmer5, NA)
+
+ggplot(df_all_lfc[order(df_all_lfc$DRACH),], 
+       aes(x = log2(median_baseMean), y = median_lfc, color = DRACH, label = label)) + 
+    geom_point() + 
+    ggrepel::geom_label_repel(hjust=0,
+    size=3, segment.size=0.25, nudge_x=0.5, direction="y", show.legend = F)  + 
+    scale_color_manual(values = c("DRACN" = DRACH_color,
+                                  "GGAC" = GGAC_color,
+                                  "Other" = m6A_color))
+```
+
+```{r fig.height=3, fig.width=3}
+df_all_lfc$DRACH[grepl("[GAT][GA]AC", df_all_lfc$kmer4)] <- 
+    df_all_lfc$kmer4[grepl("[GAT][GA]AC", df_all_lfc$kmer4)] 
+
+df_all_lfc <- df_all_lfc[order(df_all_lfc$median_lfc, decreasing = T),]
+df_all_lfc$label <- 1:nrow(df_all_lfc)
+df_all_lfc$label <- ifelse(df_all_lfc$label <= 4, df_all_lfc$kmer5, NA)
+
+ggplot(df_all_lfc[order(df_all_lfc$DRACH),], 
+       aes(x = log2(median_baseMean), y = median_lfc, color = DRACH, label = label)) + 
+    geom_point() + 
+    ggrepel::geom_label_repel(hjust=0,
+    size=3, segment.size=0.25, nudge_x=0.5, direction="y", show.legend = F)
+```
+
+```{r}
+df_all_lfc_dracn <- df_all_lfc[grep("[GAT][GA]AC[ATCG]", df_all_lfc$kmer5),]
+df_all_lfc_dracn <- df_all_lfc_dracn[order(df_all_lfc_dracn$median_lfc, decreasing = T),]
+df_all_lfc_dracn$kmer5 <- factor(df_all_lfc_dracn$kmer5, levels = df_all_lfc_dracn$kmer5) 
+ggplot(df_all_lfc_dracn, aes(x = kmer5, y = median_lfc)) + 
+    geom_col() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL, y = "Median of LFC")
+```
+
+## Whether the NGGAC are belongs to highly regulated GGACN?
+
+In the plot of frequency of top regulated 5mers, we observed NGGAC have a high frequency. My assumption here is they are coming from the shifted crosslinking signal. Therefore, in this section I will find out whether the NGGAC are from the highly regulated GGACN. For checking this, I first extract the highly regulated NGGAC, then I count the position frequency of this sites.
+
+As the plot shows, majority of the highly regulated NGGAC are located at the position 50 which is 1nt before designed m6A sites.
+
+```{r fig5bb,fig.width=10, fig.height=4, fig.pos="h", fig.cap="The frequency of highly regulated NGGAC position ."}
+NGGAC <- top_log2FC[top_log2FC$kmer5 %in% c("AGGAC", "TGGAC", "GGGAC", "CGGAC"),]
+df <- table(NGGAC$position) %>% as.data.frame()
+df$Var1 <- factor(df$Var1, levels = df$Var1)
+
+ggplot(df, aes(x = Var1, y = Freq, label = Freq)) + 
+  geom_col() + 
+  geom_vline(xintercept = 25, linetype = 2) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1,size=8,face="bold"))+
+  labs(x = NULL, y = "Frequency of position") +
+  ggtitle("The frequency of top regulated NGGAC position")
+```
+
+
+\FloatBarrier
+
+# All the DRACH or GGAC sites on the oligos
+
+Since the in vitro methylation also works for other DRACH sites on the oligo, I will try to extract all the DRACH/GGAC sites position on all the oligos and check out their log2FC.
+
+```{r eval=FALSE, include=TRUE}
+## extract the 5mer information for all the oligos
+# 1 and 2 is empty so start with 3rd
+k <- names(log2FC_DESeq2)[1]
+df <- log2FC_DESeq2[names(log2FC_DESeq2) == k][[1]]
+seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == k]
+## 51 is the position of m6A in the DESeq2 result 2 is the DR in DRACH
+df_DESeq2_all <- data.frame(ID = k,
+    log2FC = df$log2FoldChange,
+    Position = 1:141,
+    kmer5 = sapply(1:141, function(x) {substr(seq, x-2, x+2)}))
+
+for (i in names(log2FC_DESeq2)[-c(1)]) {
+  df <- log2FC_DESeq2[names(log2FC_DESeq2) == i][[1]]
+  seq <- ori_oligo_unique$deseq2_seq[ori_oligo_unique$ID == i]
+  df2 <- tryCatch({data.frame(ID = i,
+    log2FC = df$log2FoldChange,
+    Position = 1:141,
+    kmer5 = sapply(1:141, function(x) {substr(seq, x-2, x+2)}))},
+    error = function(e){data.frame(ID = i, log2FC = NA, Position = NA, kmer5 = NA)})
+  df_DESeq2_all <- rbind(df_DESeq2_all, df2)
+}
+saveRDS(df_DESeq2_all, "rds/df_DESeq2_all.rds")
+```
+
+```{r fig6c,fig.width=8, fig.height=4, fig.pos="h", fig.cap="The log2FC of DRACN vs non DRACN."}
+df_DESeq2_all <- readRDS("rds/df_DESeq2_all.rds")
+df_DESeq2_all <- na.omit(df_DESeq2_all)
+df_DESeq2_all <- df_DESeq2_all[substr(df_DESeq2_all$ID, 1, 8) != "Nathalie",]
+
+df_DESeq2_all$kmer4 <- substr(df_DESeq2_all$kmer5, 1, 4)
+df_DESeq2_all$drach <- "NO"
+df_DESeq2_all$drach[grep("[ATG][GA][A][C][ATCG]",df_DESeq2_all$kmer5)] <- "YES"
+df_DESeq2_all$Position <- as.character(df_DESeq2_all$Position)
+df_DESeq2_all$Position <- factor(df_DESeq2_all$Position, levels = as.character(1:141))
+df_DESeq2_all$Position <- as.numeric(df_DESeq2_all$Position)
+df_DESeq2_all$Position_bin <- cut(df_DESeq2_all$Position, 
+                                  breaks = c(seq(0,50,5), 51, seq(56, 141, 5)),
+                                  labels = c(seq(5,50,5), "Designed", seq(56, 141, 5)))
+
+ggplot(df_DESeq2_all, aes(x = Position_bin, y = log2FC, fill = drach)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=8,face="bold")) +
+  labs(fill = "DRACN", y = "Fold Change NC vs A (log2 scale)",
+       x = "Position on the oligo")+ 
+  geom_hline(yintercept = 0, linetype = 2) + 
+  ggtitle("DRACH vs non-DRACH") + 
+    scale_fill_manual(values = c(nonDRACH_color, DRACH_color)) + 
+    coord_cartesian(ylim = c(-2.5, 2.5))
+```
+
+```{r fig6d,fig.width=8, fig.height=4, fig.pos="h", fig.cap="The log2FC of other DRACN vs GGAC."}
+df_DESeq2_all$drach[grep("[ATG][GA][A][C][ATCG]",df_DESeq2_all$kmer5)] <- "other DRACN"
+df_DESeq2_all$drach[grep("[G][G][A][C]",df_DESeq2_all$kmer4)] <- "GGAC"
+
+df <- df_DESeq2_all[df_DESeq2_all$drach != "NO",]
+ggplot(df, aes(x = Position_bin, y = log2FC, fill = drach)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(fill = "DRACN", y = "Fold Change NC vs A (log2 scale)",
+       x = "Position on the oligo") + 
+  geom_hline(yintercept = 0, linetype = 2) +
+  ggtitle("GGAC vs other DRACN") + 
+    scale_fill_manual(values = c(GGAC_color, DRACH_color))
+```
+
+```{r fig.height=3, fig.width=3}
+my_comparisons <- list( c("GGAC", "NO"), 
+                        c("GGAC", "other DRACN"),
+                        c("other DRACN", "NO"))
+
+ggplot(df_DESeq2_all, aes(x = drach, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = NULL, y = "Fold Change NC/A [log2]") + 
+    geom_hline(yintercept = 0, linetype = 2)  + 
+  stat_compare_means(comparisons = my_comparisons, label.y = c(3.6,4,3.2),
+                     method = "wilcox.test") + 
+    coord_cartesian(ylim = c(-1.5, 5)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+
+```
+
+
+\FloatBarrier
+
+# The designed sites from CDS and 3'UTR receive a similar effect from in vitro methylation
+
+```{r}
+Hek_miCLIP_peaks <- readRDS("rds/Hek_m6A.rds")
+Hek_miCLIP_peaks <- metaGeneProfile(Hek_miCLIP_peaks, "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+```
+
+```{r fig.height=4, fig.width=8}
+Hek_miCLIP_peaks$ID <- paste0(seqnames(Hek_miCLIP_peaks), ":", start(Hek_miCLIP_peaks), ",",
+                              strand(Hek_miCLIP_peaks))
+
+log2FC_m6A$location <- Hek_miCLIP_peaks$location[match(log2FC_m6A$ID, 
+                                                  Hek_miCLIP_peaks$ID)]
+log2FC_m6A$Position <- Hek_miCLIP_peaks$Position[match(log2FC_m6A$ID, 
+                                                  Hek_miCLIP_peaks$ID)]
+df <- log2FC_m6A[log2FC_m6A$location %in% c("UTR3", "CDS"),]
+
+my_comparisons <- list( c("UTR3", "CDS"))
+ggplot(df[df$kmer5 %in% c("GGACT", "GGACA", "GAACT", "GGACC"),], aes(x = location, y = log2FC)) + 
+    geom_violin() +
+    geom_boxplot(outlier.shape = NA, width = 0.3, fill = c(CDS_color, UTR3_color)) +
+    stat_compare_means(comparisons = my_comparisons, label.y = 3.2, 
+                       method = "wilcox.test") + 
+    coord_cartesian(ylim = c(-1.8,4)) + 
+    labs(x = NULL, y = "log2FC upon invitro methylation",
+         title = "The invitro methylation 3'UTR vs CDS (GGACT, GGACA, GAACT, GGACC)") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+## Metaprofile
+
+```{r fig.height=8, fig.width=8}
+log2FC_m6A_f <- log2FC_m6A[log2FC_m6A$location %in% c("UTR3", "UTR5", "CDS"),]
+log2FC_m6A_f$Position[log2FC_m6A_f$location == "CDS"] <- 
+    log2FC_m6A_f$Position[log2FC_m6A_f$location == "CDS"] + 1
+log2FC_m6A_f$Position[log2FC_m6A_f$location == "UTR3"] <- 
+    log2FC_m6A_f$Position[log2FC_m6A_f$location == "UTR3"] + 2
+
+log2FC_m6A_f <- log2FC_m6A_f %>% 
+    mutate(loca_bin = cut(Position, breaks = c(seq(0,3,0.1)), 
+           labels = c(as.character(seq(0.1,3,0.1)))))
+log2FC_m6A_f$loca_bin <- factor(log2FC_m6A_f$loca_bin,
+                                levels = seq(0.1,3,0.1))
+p1 <- ggplot(log2FC_m6A_f, aes(x = Position)) + 
+    geom_density() + 
+    scale_x_continuous(breaks = c(0.5,1.5,2.5),
+                       labels = c("5'UTR", "CDS", "3'UTR"))+ 
+    geom_vline(xintercept = c(1,2), linetype = 2)
+
+p2 <- ggplot(log2FC_m6A_f, aes(x = loca_bin, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.8, 4)) +
+    scale_x_discrete(labels = c(rep("", 4), "5'UTR", rep("", 9),"CDS", 
+                                rep("", 9), "3'UTR", rep("", 5))) + 
+    geom_vline(xintercept = c(10.5,20.5), linetype = 2) + 
+    labs(x = NULL, y = "log2FC upon invitro methylation",
+         title = "The invitro methylation for m6A sites in different position") + 
+    theme(axis.ticks.x = element_blank()) + 
+    geom_hline(yintercept = 0, linetype =2, color = "grey")
+p1/p2
+```
+
+```{r fig.height=4, fig.width=8}
+m6A_hek_miCLIP <- Hek_miCLIP_peaks[Hek_miCLIP_peaks$Pred == "YES"]
+m6A_hek_miCLIP$Position[m6A_hek_miCLIP$location == "CDS"] <-
+    m6A_hek_miCLIP$Position[m6A_hek_miCLIP$location == "CDS"] + 1
+m6A_hek_miCLIP$Position[m6A_hek_miCLIP$location == "UTR3"] <-
+    m6A_hek_miCLIP$Position[m6A_hek_miCLIP$location == "UTR3"] + 2
+
+ggplot(as.data.frame(m6A_hek_miCLIP), aes(x = Position)) + 
+    geom_density() + 
+    scale_x_continuous(breaks = c(0.5,1.5,2.5),
+                       labels = c("5'UTR", "CDS", "3'UTR"))+ 
+    geom_vline(xintercept = c(1,2), linetype = 2) + 
+    coord_cartesian(xlim = c(0,3)) + 
+    labs(title = "Metageneprofile of miCLIP m6A sites")
+```
+
+# The designed DRACH sites can be equally methylated even it is very close the the splice sites in transcript
+We have learned that the exon junction complex (EJC) is likely to prevent the m6A deposition around 
+splice sites (SS). Here we will investigate if the designed DRACH sites can be equally methylated 
+in vitro no matter the distance to the closest SS.
+
+```{r}
+## make grange object with sites' ID
+log2FC_m6A_sub$seqnames <- sub("\\:.*", "", log2FC_m6A_sub$ID)
+log2FC_m6A_sub$start <- log2FC_m6A_sub$end <- getstr(log2FC_m6A_sub$ID, ":", 1, ",", 1)
+log2FC_m6A_sub$strand <- sub(".*\\,", "", log2FC_m6A_sub$ID)
+gr_used_m6A <- makeGRangesFromDataFrame(log2FC_m6A_sub, keep.extra.columns = T)
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+gr_used_m6A <- metaGeneProfile(gr_used_m6A,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+```
+
+```{r}
+gr_used_m6A <- dis_to_SS(gr_used_m6A, hg38)
+gr_used_m6A <- gr_used_m6A[!is.na(gr_used_m6A$log2FC)]
+gr_used_m6A$bin_dis_SS <- cut(gr_used_m6A$dis_SS, breaks = c(seq(0,300, 50), Inf),
+                              labels = c(seq(50,300,50), ">300"))
+
+p1 <- ggplot(as.data.frame(gr_used_m6A[!is.na(gr_used_m6A$bin_dis_SS)]), 
+             aes(x = bin_dis_SS)) +
+    geom_bar() + 
+    geom_text(aes(label = ..count..),  stat = "count")
+p2 <- ggplot(as.data.frame(gr_used_m6A[!is.na(gr_used_m6A$bin_dis_SS)]), 
+       aes(x = bin_dis_SS, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-0.5,1.5)) +
+    geom_hline(yintercept = median(gr_used_m6A$log2FC[which(gr_used_m6A$bin_dis_SS == "30")]),
+               linetype = 2) +
+    labs(x = "The shortest distance to SS",
+         y = "log2FC upon in vitro methylation",
+         title = "All designed sites")
+p1 + p2
+```
+
+```{r}
+ggplot(as.data.frame(gr_used_m6A[!is.na(gr_used_m6A$bin_dis_SS)]), 
+             aes(x = bin_dis_SS, fill = kmer5)) +
+    geom_bar(position = "fill") +
+    labs(y = "Fraction", x = "The shortest distance to SS", 
+         title = "The 5mer distribution of designed sites")
+```
+
+```{r fig.height=3, fig.width=6}
+tmp <- gr_used_m6A[!is.na(gr_used_m6A$bin_dis_SS) &
+                                     gr_used_m6A$kmer5 %in% c("GGACT", "GGACA", "GAACT", "GGACC")]
+p1 <- ggplot(as.data.frame(tmp), 
+             aes(x = bin_dis_SS, fill = design)) +
+    geom_bar(position = "fill") + 
+    labs(x = "The shortest distance to SS",
+         y = "Fraction",
+         title = "(GGACT, GGACA, GAACT, GGACC)")
+p2 <- ggplot(as.data.frame(tmp), 
+       aes(x = bin_dis_SS, y = log2FC)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.8, 4)) +
+    geom_hline(yintercept = median(tmp$log2FC[which(tmp$bin_dis_SS == "50")]),
+               linetype = 2) +
+    labs(x = "The shortest distance to SS",
+         y = "log2FC upon in vitro methylation",
+         title = "(GGACT, GGACA, GAACT, GGACC)")
+p1+p2
+```
+
+```{r fig.height=3, fig.width=6}
+hg38_used <- hg38[hg38$transcript_id %in% m6A_hek_miCLIP$Transcript_ID]
+
+m6A_hek_miCLIP <- dis_to_SS(m6A_hek_miCLIP, hg38_used)
+
+m6A_hek_miCLIP$bin_dis_SS <- cut(m6A_hek_miCLIP$dis_SS, breaks = c(seq(0,300, 50), Inf),
+                              labels = c(seq(50,300,50), ">300"))
+
+ggplot(as.data.frame(m6A_hek_miCLIP[!is.na(m6A_hek_miCLIP$bin_dis_SS)]), aes(x = bin_dis_SS)) + 
+    geom_bar() + 
+    labs(x = "The shortest distance to SS", y = "Number", 
+         title = "The number of m6A sites with different distance to SS (miCLIP)")
+```
+
+
+\FloatBarrier
+
+# The correlation between in vivo methylation ratio and in vitro log2FC
+
+```{r eval=FALSE, include=TRUE}
+## assign m6A sites to annotation
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+m6A_miCLIP_HEK <- readRDS(paste0(path.to.data, "Hek_m6A_new.rds"))
+m6A_miCLIP_HEK <- metaGeneProfile(m6A_miCLIP_HEK,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+m6A_GLORI_HEK <- readRDS(paste0(path.to.data, "m6A_glori.rds"))
+m6A_GLORI_HEK <- metaGeneProfile(m6A_GLORI_HEK,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+saveRDS(m6A_miCLIP_HEK, paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+saveRDS(m6A_GLORI_HEK, paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+```
+
+## miCLIP in HEK283T
+
+```{r eval=FALSE, include=T}
+## in-vitro m6A/A ratio
+DRACN <- "[GAT][GA]AC[TACG]"
+## DRACH sites on transcripts
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+
+m6A_miCLIP_HEK <- readRDS(paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+hg38_m6A <- hg38[hg38$transcript_id %in%
+                 m6A_miCLIP_HEK$Transcript_ID[!is.na(m6A_miCLIP_HEK$Transcript_ID)]]
+
+hg38_m6A_exon <- hg38_m6A[hg38_m6A$type == "exon"] %>% as.data.frame(.) %>%
+    group_by(transcript_id) %>% mutate(trans_len = sum(width)) %>%
+    makeGRangesFromDataFrame(., keep.extra.column = T)
+
+## order the transcript for the later nucleotide assignment
+hg38_m6A$trans_len <- hg38_m6A_exon$trans_len[match(hg38_m6A$transcript_id,
+                                                    hg38_m6A_exon$transcript_id)]
+hg38_m6A_exon <- IRanges::reduce(hg38_m6A_exon)
+## split the exon into 1 nt
+hg38_m6A_exon <- GenomicRanges::tile(hg38_m6A_exon, width = 1) %>% unlist(.) 
+
+hg38_m6A <- hg38_m6A[order(hg38_m6A$level, hg38_m6A$transcript_support_level,
+                           -hg38_m6A$trans_len)]
+o <- findOverlaps(hg38_m6A_exon, hg38_m6A, select = "first")
+
+hg38_m6A_exon$Transcript_ID <- hg38_m6A$transcript_id[o]
+hg38_m6A_exon$kmer5 <- getSeq(Hsapiens, hg38_m6A_exon+2) %>% suppressWarnings()
+hg38_m6A_exon_drach <- hg38_m6A_exon[grep(DRACN, hg38_m6A_exon$kmer5)]
+
+## distance to SS
+hg38_m6A_exon_drach <- metaGeneProfile(hg38_m6A_exon_drach,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+hg38_m6A_exon_drach <- dis_to_SS(hg38_m6A_exon_drach, hg38_m6A)
+hg38_m6A_exon_drach_f <- hg38_m6A_exon_drach[which(hg38_m6A_exon_drach$dis_SS >= 200)]
+
+hg38_m6A_exon_drach_f$is.m6A <- ifelse(hg38_m6A_exon_drach_f %over% m6A_miCLIP_HEK, T, F)
+df <- as.data.frame(hg38_m6A_exon_drach_f) %>% group_by(is.m6A, kmer5) %>%
+    summarise(number = n(), .groups = "drop")
+df_1 <- df[df$is.m6A == T,]
+df$m6A_number <- df_1$number[match(df$kmer5, df_1$kmer5)]
+df <- df[df$is.m6A == F,]
+df$all_number <- df$m6A_number+df$number
+
+df$m6A_ratio <- df$m6A_number/df$all_number
+df <- df[order(df$m6A_ratio, decreasing = T),]
+df$kmer5 <- factor(df$kmer5, levels = df$kmer5)
+
+saveRDS(df, "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/m6A_ratio_miCLIP_HEK.rds")
+```
+
+```{r}
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+all_de_dracn <- df_DESeq2_all[grep("[GAT][GA]AC[TACG]", df_DESeq2_all$kmer5),]
+
+df <- all_de_dracn %>% group_by(kmer5) %>% 
+    summarise(median = median(log2FC, na.rm = TRUE))
+
+m6a_ratio <- readRDS(paste0(path.to.data, "m6A_ratio_miCLIP_HEK.rds"))
+
+df$m6A_ratio <- m6a_ratio$m6A_ratio[match(df$kmer5, m6a_ratio$kmer5)]
+
+ggplot(df, aes(x = median, y = m6A_ratio, label = kmer5)) + 
+    geom_point()  + 
+  labs(x = "In vitro log2FC", y = "m6A/A ratio in vivo") + 
+  geom_smooth(method = "lm") + 
+  ggrepel::geom_label_repel(max.overlaps = Inf) + 
+  stat_cor() +
+  ggtitle("m6A ratio vs LFC (miCLIP)")
+```
+
+```{r fig.height=4, fig.width=4}
+m6a_ratio$log2_all_motif <- log2(m6a_ratio$all_number)
+m6a_ratio$GGACN <- ifelse(substr(m6a_ratio$kmer5,1,4) == "GGAC", T, F)
+m6a_ratio <- m6a_ratio[order(m6a_ratio$m6A_ratio, decreasing = T),]
+
+m6a_ratio$label <- m6a_ratio$kmer5
+m6a_ratio$label[11:nrow(m6a_ratio)] <- NA
+m6a_ratio$label[substr(m6a_ratio$kmer5, 3, 5) == "ACT"] <- 
+    m6a_ratio$kmer5[substr(m6a_ratio$kmer5, 3, 5) == "ACT"]
+ggplot(m6a_ratio, aes(x = log2_all_motif, y = m6A_ratio, label = label, 
+                      color = GGACN)) + 
+    geom_point() + 
+    ggrepel::geom_text_repel(show.legend = F) + 
+    labs(y = "m6A/A ratio", x = "Number of the DRACN motif on m6A containing transcripts (log2)",
+         title = "DRACN motif in vivo methylation ratio (HEK miCLIP)")
+```
+
+```{r fig.height=4, fig.width=3}
+ggplot(m6a_ratio, aes(y = reorder(kmer5, m6A_ratio), x = m6A_ratio)) + 
+    geom_col()  + 
+    labs(title = "m6A ratio on DRACH in vivo (HEK miCLIP2)")
+```
+
+```{r fig.height=4, fig.width=4}
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv"))
+
+DRACN <- "[GAT][GA]AC[TACG]"
+m6A_miCLIP_HEK <- readRDS(paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+m6A_miCLIP_HEK$kmer5 <- getSeq(Hsapiens, m6A_miCLIP_HEK+2) %>% suppressWarnings()
+
+m6A_number <- as.data.frame(m6A_miCLIP_HEK) %>% group_by(Gene_ID) %>%
+    summarise(number = n())
+
+## keep only the m6A on DRACN motif
+m6A_miCLIP_HEK <- m6A_miCLIP_HEK[grep(DRACN, m6A_miCLIP_HEK$kmer5)]
+test_5mer <- unique(m6A_miCLIP_HEK$kmer5) %>% as.character()
+for (i in test_5mer) {
+    tmp <- m6A_miCLIP_HEK[m6A_miCLIP_HEK$kmer5 == i]
+    number <- as.data.frame(tmp) %>% group_by(Gene_ID) %>%
+    summarise(number = n())
+    
+    m6A_number[,ncol(m6A_number) + 1] <- number$number[match(m6A_number$Gene_ID,
+                                                             number$Gene_ID)]
+    colnames(m6A_number)[ncol(m6A_number)] <- i
+}
+
+## replace NA to 0 means the gene have 0 m6A sites in xx motif
+m6A_number[is.na(m6A_number)] <- 0
+m6A_number$log2FC_stm9h <- da_stm_9h$log2FC[match(m6A_number$Gene_ID, da_stm_9h$gene_id)]
+m6A_number <- m6A_number[m6A_number$Gene_ID != "Nan",]
+m6A_number <- m6A_number[!is.na(m6A_number$log2FC_stm9h),]
+
+library(ppcor)
+tmp <- dplyr::select(m6A_number, number, test_5mer[1], log2FC_stm9h, ) %>% as.data.frame()
+partial_cor <- pcor(tmp, method = "pearson")
+df_part_cor <- data.frame(person.cor = partial_cor$estimate[2,3],
+                 pvalue = partial_cor$p.value[2,3],
+                 person.cor.m6A.number = partial_cor$estimate[1,3],
+                 pvalue.m6A.number = partial_cor$p.value[1,3],
+                 kmer5 = test_5mer[1])
+
+for (i in test_5mer[-1]) {
+    tmp <- m6A_number[,c("number", i, "log2FC_stm9h")] %>% as.data.frame()
+    partial_cor <- pcor(tmp, method = "pearson")
+    df <- data.frame(person.cor = partial_cor$estimate[2,3],
+                     pvalue = partial_cor$p.value[2,3],
+                     person.cor.m6A.number = partial_cor$estimate[1,3],
+                     pvalue.m6A.number = partial_cor$p.value[1,3],
+                     kmer5 = i)
+    df_part_cor <- rbind(df_part_cor, df)
+}
+
+## since for each 5mers there is a pearson correlation value for m6A number here we will use the 
+## median of them as the value in the plot
+# df_part_cor$person.cor.m6A.number <- round(df_part_cor$person.cor.m6A.number,4)
+# person.cor.m6A <- median(df_part_cor$person.cor.m6A.number)
+# pvalue.m6A <- df_part_cor$pvalue.m6A.number[df_part_cor$person.cor.m6A ==
+#                                                 median(df_part_cor$person.cor.m6A.number)]
+# df_part_cor[nrow(df_part_cor)+1,] <- c(person.cor.m6A, pvalue.m6A, 0, 0, "m6A number")
+
+## m6A number
+df_m6a <- data.frame(person.cor = df_part_cor$person.cor.m6A.number,
+                     pvalue = df_part_cor$pvalue.m6A.number, 
+                     person.cor.m6A.number = 0,
+                     pvalue.m6A.number = 0,
+                     kmer5 = "m6A number")
+df_part_cor <- rbind(df_part_cor, df_m6a)
+## padj 
+df_part_cor$padj <- p.adjust(df_part_cor$pvalue, method = "BH")
+df_part_cor$logpadj <- -log10(df_part_cor$padj)
+df_part_cor$sig <- ifelse(df_part_cor$padj < 0.05, T, F)
+df_part_cor$person.cor <- as.numeric(df_part_cor$person.cor)
+df_part_cor <- df_part_cor[order(df_part_cor$person.cor, decreasing = F),]
+df_part_cor$kmer5 <- factor(df_part_cor$kmer5, levels = df_part_cor$kmer5[1:25])
+    
+ggplot(df_part_cor[-c(26:48),], aes(y = kmer5, x = person.cor, color = sig)) + 
+    geom_point()  + 
+    labs(x = "Pearson correlation coefficient (partial correlation)",
+         y = NULL,
+         color = "Significant in correlation") +
+    theme(
+      panel.grid.minor.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      legend.position="top") + 
+    geom_segment(data = df_part_cor[-c(25:48),], 
+                 aes(y=kmer5 ,yend=kmer5, x=0, xend = person.cor), color="grey") + 
+    geom_boxplot(data = df_part_cor[df_part_cor$kmer5 == "m6A number",],
+                 aes(x = person.cor, y = kmer5), show.legend = F, fill = "white")
+```
+
+## GLORI HEK293T
+
+```{r eval=FALSE, include=T}
+m6A_hek_GLORI <- readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+hg38_m6A <- hg38[hg38$transcript_id %in%
+                 m6A_hek_GLORI$Transcript_ID[!is.na(m6A_hek_GLORI$Transcript_ID)]]
+
+hg38_m6A_exon <- hg38_m6A[hg38_m6A$type == "exon"] %>% as.data.frame(.) %>%
+    group_by(transcript_id) %>% mutate(trans_len = sum(width)) %>%
+    makeGRangesFromDataFrame(., keep.extra.column = T)
+
+hg38_m6A$trans_len <- hg38_m6A_exon$trans_len[match(hg38_m6A$transcript_id,
+                                                    hg38_m6A_exon$transcript_id)]
+hg38_m6A_exon <- IRanges::reduce(hg38_m6A_exon)
+## split the exon into 1 nt
+hg38_m6A_exon <- GenomicRanges::tile(hg38_m6A_exon, width = 1) %>% unlist(.) 
+
+hg38_m6A <- hg38_m6A[order(hg38_m6A$level, hg38_m6A$transcript_support_level,
+                           -hg38_m6A$trans_len)]
+o <- findOverlaps(hg38_m6A_exon, hg38_m6A, select = "first")
+
+hg38_m6A_exon$Transcript_ID <- hg38_m6A$transcript_id[o]
+hg38_m6A_exon$kmer5 <- getSeq(Hsapiens, hg38_m6A_exon+2) %>% suppressWarnings()
+hg38_m6A_exon_drach <- hg38_m6A_exon[grep(DRACN, hg38_m6A_exon$kmer5)]
+
+## distance to SS
+hg38_m6A_exon_drach <- metaGeneProfile(hg38_m6A_exon_drach,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+hg38_m6A_exon_drach <- dis_to_SS(hg38_m6A_exon_drach, hg38_m6A)
+hg38_m6A_exon_drach_f <- hg38_m6A_exon_drach[which(hg38_m6A_exon_drach$dis_SS >= 200)]
+
+hg38_m6A_exon_drach_f$is.m6A <- ifelse(hg38_m6A_exon_drach_f %over% m6A_hek_GLORI, T, F)
+df <- as.data.frame(hg38_m6A_exon_drach_f) %>% group_by(is.m6A, kmer5) %>%
+    summarise(number = n(), .groups = "drop")
+df_1 <- df[df$is.m6A == T,]
+df$m6A_number <- df_1$number[match(df$kmer5, df_1$kmer5)]
+df <- df[df$is.m6A == F,]
+df$all_number <- df$m6A_number+df$number
+
+df$m6A_ratio <- df$m6A_number/df$all_number
+df <- df[order(df$m6A_ratio, decreasing = T),]
+df$kmer5 <- factor(df$kmer5, levels = df$kmer5)
+
+saveRDS(df, "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/m6A_ratio_GLORI_HEK.rds")
+```
+
+```{r}
+all_de_dracn <- df_DESeq2_all[grep("[GAT][GA]AC[TACG]", df_DESeq2_all$kmer5),]
+
+df <- all_de_dracn %>% group_by(kmer5) %>% 
+    summarise(median = median(log2FC, na.rm = TRUE))
+
+m6a_ratio <- readRDS(paste0(path.to.data, "m6A_ratio_GLORI_HEK.rds"))
+
+df$m6A_ratio <- m6a_ratio$m6A_ratio[match(df$kmer5, m6a_ratio$kmer5)]
+
+ggplot(df, aes(x = median, y = m6A_ratio, label = kmer5)) + 
+    geom_point()  + 
+  labs(x = "In vitro log2FC", y = "m6A/A ratio in vivo") + 
+  geom_smooth(method = "lm") + 
+  ggrepel::geom_label_repel(max.overlaps = Inf) + 
+  stat_cor() +
+  ggtitle("m6A ratio vs LFC (GLORI)")
+```
+
+```{r}
+ggplot(m6a_ratio, aes(x = kmer5, y = m6A_ratio)) + 
+    geom_col() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(title = "m6A ratio on DRACH in vivo (HEK GLORI)")
+```
+
+```{r fig.height=4, fig.width=4}
+m6a_ratio$log2_all_motif <- log2(m6a_ratio$all_number)
+m6a_ratio$GGACN <- ifelse(substr(m6a_ratio$kmer5,1,4) == "GGAC", T, F)
+
+m6a_ratio <- m6a_ratio[order(m6a_ratio$m6A_ratio, decreasing = T),]
+
+m6a_ratio$label <- m6a_ratio$kmer5
+m6a_ratio$label[11:nrow(m6a_ratio)] <- NA
+m6a_ratio$label[substr(m6a_ratio$kmer5, 3, 5) == "ACT"] <- 
+    m6a_ratio$kmer5[substr(m6a_ratio$kmer5, 3, 5) == "ACT"]
+ggplot(m6a_ratio, aes(x = log2_all_motif, y = m6A_ratio, label = label, 
+                      color = GGACN)) + 
+    geom_point() + 
+    ggrepel::geom_text_repel(show.legend = F) + 
+    labs(y = "m6A/A ratio", x = "Number of the DRACN motif on m6A containing transcripts (log2)",
+         title = "DRACN motif in vivo methylation ratio (HEK GLORI)")
+```
+
+```{r fig.height=4, fig.width=4}
+m6A_hek_GLORI <- readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+m6A_hek_GLORI$kmer5 <- getSeq(Hsapiens, m6A_hek_GLORI+2) %>% suppressWarnings()
+m6A_number <- as.data.frame(m6A_hek_GLORI) %>% group_by(Gene_ID) %>%
+    summarise(number = n())
+
+m6A_hek_GLORI <- m6A_hek_GLORI[grep(DRACN, m6A_hek_GLORI$kmer5)]
+test_5mer <- unique(m6A_hek_GLORI$kmer5) %>% as.character()
+
+for (i in test_5mer) {
+    tmp <- m6A_hek_GLORI[m6A_hek_GLORI$kmer5 == i]
+    number <- as.data.frame(tmp) %>% group_by(Gene_ID) %>%
+    summarise(number = n())
+    
+    m6A_number[,ncol(m6A_number) + 1] <- number$number[match(m6A_number$Gene_ID,
+                                                             number$Gene_ID)]
+    colnames(m6A_number)[ncol(m6A_number)] <- i
+}
+m6A_number[is.na(m6A_number)] <- 0
+m6A_number$log2FC_stm9h <- da_stm_9h$log2FC[match(m6A_number$Gene_ID, da_stm_9h$gene_id)]
+m6A_number <- m6A_number[m6A_number$Gene_ID != "Nan",]
+m6A_number <- m6A_number[!is.na(m6A_number$log2FC_stm9h),]
+
+library(ppcor)
+tmp <- dplyr::select(m6A_number, number, test_5mer[1], log2FC_stm9h, ) %>% as.data.frame()
+partial_cor <- pcor(tmp, method = "pearson")
+df_part_cor <- data.frame(person.cor = partial_cor$estimate[2,3],
+                 pvalue = partial_cor$p.value[2,3],
+                 person.cor.m6A.number = partial_cor$estimate[1,3],
+                 pvalue.m6A.number = partial_cor$p.value[1,3],
+                 kmer5 = test_5mer[1])
+
+for (i in test_5mer[-1]) {
+    tmp <- m6A_number[,c("number", i, "log2FC_stm9h")] %>% as.data.frame()
+    partial_cor <- pcor(tmp, method = "pearson")
+    df <- data.frame(person.cor = partial_cor$estimate[2,3],
+                     pvalue = partial_cor$p.value[2,3],
+                     person.cor.m6A.number = partial_cor$estimate[1,3],
+                     pvalue.m6A.number = partial_cor$p.value[1,3],
+                     kmer5 = i)
+    df_part_cor <- rbind(df_part_cor, df)
+}
+
+## since for each 5mers there is a pearson correlation value for m6A number here we will use the 
+## median of them as the value in the plot
+# person.cor.m6A <- median(df_part_cor$person.cor.m6A.number)
+# pvalue.m6A <- df_part_cor$pvalue.m6A.number[df_part_cor$person.cor.m6A.number == person.cor.m6A]
+# df_part_cor[nrow(df_part_cor)+1,] <- c(person.cor.m6A, pvalue.m6A, 0, 0, "m6A number")
+
+
+df_m6a <- data.frame(person.cor = df_part_cor$person.cor.m6A.number,
+                     pvalue = df_part_cor$pvalue.m6A.number, 
+                     person.cor.m6A.number = 0,
+                     pvalue.m6A.number = 0,
+                     kmer5 = "m6A number")
+df_part_cor <- rbind(df_part_cor, df_m6a)
+## padj 
+df_part_cor$padj <- p.adjust(df_part_cor$pvalue, method = "BH")
+df_part_cor$logpadj <- -log10(df_part_cor$padj)
+df_part_cor$sig <- ifelse(df_part_cor$padj < 0.05, T, F)
+df_part_cor$person.cor <- as.numeric(df_part_cor$person.cor)
+df_part_cor <- df_part_cor[order(df_part_cor$person.cor, decreasing = F),]
+df_part_cor$kmer5 <- factor(df_part_cor$kmer5, levels = df_part_cor$kmer5[1:25])
+
+ggplot(df_part_cor[-c(26:48),], aes(y = kmer5, x = person.cor, color = sig)) + 
+    geom_point()  + 
+    labs(x = "Pearson correlation coefficient (partial correlation)",
+         y = NULL,
+         color = "Significant in correlation") +
+    theme(
+      panel.grid.minor.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      legend.position="top") + 
+    geom_segment(data = df_part_cor[-c(25:48),], 
+                 aes(y=kmer5 ,yend=kmer5, x=0, xend = person.cor), color="grey") + 
+    geom_boxplot(data = df_part_cor[df_part_cor$kmer5 == "m6A number",],
+                 aes(x = person.cor, y = kmer5), show.legend = F, fill = "white")
+```
+
+# The positive correlation between DRACN number and log2FC upon STM 9h
+
+```{r eval=FALSE, include=T}
+hg38_m6A <- hg38[hg38$transcript_id %in%
+                 m6A_hek_GLORI$Transcript_ID[!is.na(m6A_hek_GLORI$Transcript_ID)]]
+
+hg38_m6A_exon <- hg38_m6A[hg38_m6A$type == "exon"] %>% as.data.frame(.) %>%
+    group_by(transcript_id) %>% mutate(trans_len = sum(width)) %>%
+    makeGRangesFromDataFrame(., keep.extra.column = T)
+
+hg38_m6A$trans_len <- hg38_m6A_exon$trans_len[match(hg38_m6A$transcript_id,
+                                                    hg38_m6A_exon$transcript_id)]
+hg38_m6A_exon <- IRanges::reduce(hg38_m6A_exon)
+## split the exon into 1 nt
+hg38_m6A_exon <- GenomicRanges::tile(hg38_m6A_exon, width = 1) %>% unlist(.) 
+
+hg38_m6A <- hg38_m6A[order(hg38_m6A$level, hg38_m6A$transcript_support_level,
+                           -hg38_m6A$trans_len)]
+o <- findOverlaps(hg38_m6A_exon, hg38_m6A, select = "first")
+
+hg38_m6A_exon$Transcript_ID <- hg38_m6A$transcript_id[o]
+hg38_m6A_exon$kmer5 <- getSeq(Hsapiens, hg38_m6A_exon+2) %>% suppressWarnings()
+hg38_m6A_exon_drach <- hg38_m6A_exon[grep(DRACN, hg38_m6A_exon$kmer5)]
+
+## distance to SS
+hg38_m6A_exon_drach <- metaGeneProfile(hg38_m6A_exon_drach,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+hg38_m6A_exon_drach <- dis_to_SS(hg38_m6A_exon_drach, hg38_m6A)
+hg38_m6A_exon_drach_f <- hg38_m6A_exon_drach[which(hg38_m6A_exon_drach$dis_SS >= 200)]
+
+hg38_m6A_exon_drach_f$is.m6A <- ifelse(hg38_m6A_exon_drach_f %over% m6A_hek_GLORI, T, F)
+
+saveRDS(hg38_m6A_exon_drach_f, paste0(path.to.data, "hg38_m6A_exon_drach_f"))
+```
+
+```{r fig.height=4, fig.width=4}
+hg38_m6A_exon_drach_f <- readRDS(paste0(path.to.data, "hg38_m6A_exon_drach_f"))
+DRACHN_number <- as.data.frame(hg38_m6A_exon_drach_f) %>%
+    group_by(Gene_ID) %>% summarise(number = n())
+DRACHN_number$bin_number <- cut(DRACHN_number$number, breaks = c(0,15,30,45,60,Inf))
+DRACHN_number$log2FC_stm9h <- da_stm_9h$log2FC[match(
+    DRACHN_number$Gene_ID, da_stm_9h$gene_id
+)]
+ggplot(DRACHN_number, aes(x = bin_number, y = log2FC_stm9h)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) + 
+    labs(x = "DRACN number on transcript", y = "Fold change upon STM2457 9h (log2)")
+```
+
+```{r fig.height=6, fig.width=6}
+tmp.1 <- hg38_m6A_exon_drach_f[hg38_m6A_exon_drach_f$kmer5 %in% c("GGACT","GGACG","GGACA","GGACC")]
+tmp_1 <- as.data.frame(tmp.1) %>% group_by(Gene_ID) %>% summarise(number = n())  %>% 
+    mutate(group = "GGACN")
+
+tmp_1$log2FC_stm9h <- da_stm_9h$log2FC[match(tmp_1$Gene_ID, da_stm_9h$gene_id)]
+tmp_1$bin_number <- cut(tmp_1$number, breaks = c(0,8,16,24,30,Inf))
+
+## third  tier
+tmp <- subsetByOverlaps(hg38_m6A_exon_drach_f, c(tmp.1), invert = T)
+tmp_3 <- as.data.frame(tmp) %>% group_by(Gene_ID) %>% summarise(number = n()) %>% 
+    mutate(group = "Other DRACN")
+
+tmp_3$log2FC_stm9h <- da_stm_9h$log2FC[match(tmp_3$Gene_ID, da_stm_9h$gene_id)]
+tmp_3$bin_number <- cut(tmp_3$number, breaks = c(0,8,16,24,30,Inf))
+
+df <- rbind(tmp_1, tmp_3)
+df$group <- factor(df$group, levels = c("GGACN", "Other DRACN"))
+p1 <- ggplot(df, aes(fill = bin_number, y = log2FC_stm9h, x = group)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) + 
+    labs( x = "Number of DRACN 5mers on transcript") + 
+    geom_hline(yintercept = 0, linetype = 2)
+
+p2 <- ggplot(df, aes(x = bin_number, y = log2FC_stm9h, fill = group)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) + 
+    labs( x = "Number of DRACN 5mers on transcript") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1/p2
+```
+
+# Nanopore m6A sites
+
+```{r eval=FALSE, include=T}
+nano_m6A <- 
+    import.bed("~/Desktop/Data/m6Asites/HEK293_Nanopore_Transcripts/GenomicCoord.bed") %>%
+    as.data.frame(.)
+nano_m6A$seqnames <- as.character(nano_m6A$seqnames)
+nano_m6A$seqnames[nano_m6A$seqnames == "MT"] <- "M"
+nano_m6A$seqnames <- paste0("chr", nano_m6A$seqnames)
+nano_m6A <- makeGRangesFromDataFrame(nano_m6A, keep.extra.columns = T)
+nano_m6A <- nano_m6A[seqnames(nano_m6A) %in% standardChromosomes(nano_m6A)]
+nano_m6A$ID <- paste0(seqnames(nano_m6A), ":", start(nano_m6A), " ", strand(nano_m6A))
+
+nano_m6A$kmer5 <- getSeq(Hsapiens, nano_m6A+2) %>% suppressWarnings(.)
+nano_m6A$seq <- substring(nano_m6A$kmer5, 3, 3)
+nano_m6A$name2 <- paste0(nano_m6A$name, "#")
+
+# extract info from name
+nano_m6A$treatment <- getstr(nano_m6A$name2, "_", 2, "_", 4)
+nano_m6A$probability <- getstr(nano_m6A$name2, "_", 7, "_", 8) %>% as.numeric()
+nano_m6A$stoi <- getstr(nano_m6A$name2, "_", 8, "#", 1) %>% as.numeric()
+nano_m6A$kmer5_old <- getstr(nano_m6A$name2, "_", 6, "_", 7)
+
+nano_m6A <- metaGeneProfile(nano_m6A,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+nano_m6A_wt1 <- nano_m6A[nano_m6A$treatment == "DMSO_1"]
+nano_m6A_wt2 <- nano_m6A[nano_m6A$treatment == "DMSO_3"]
+
+nano_m6A_wt <- subsetByOverlaps(nano_m6A_wt1, nano_m6A_wt2)
+nano_m6A_wt$prob_wt2 <- nano_m6A_wt2$probability[match(nano_m6A_wt$ID, nano_m6A_wt2$ID)]
+nano_m6A_wt$stoi_wt2 <- nano_m6A_wt2$stoi[match(nano_m6A_wt$ID, nano_m6A_wt2$ID)]
+
+nano_m6A_wt$prob_wt_mean <- (nano_m6A_wt$probability + nano_m6A_wt$prob_wt2)/2
+nano_m6A_wt$stoi_wt_mean <- (nano_m6A_wt$stoi + nano_m6A_wt$stoi_wt2)/2
+
+
+## calculating the m6A/A ratio
+hg38_used <- hg38[hg38$transcript_id %in% nano_m6A_wt$Transcript_ID]
+
+nano_m6A_wt <- dis_to_SS(nano_m6A_wt, hg38_used)
+
+DRACN <- "[GAT][GA]AC[TACG]"
+nano_m6A_wt_f <- nano_m6A_wt[nano_m6A_wt$prob_wt_mean > 0.6 &
+                                 nano_m6A_wt$dis_SS > 200]
+
+hg38_m6A <- hg38[hg38$transcript_id %in%
+                 nano_m6A_wt_f$Transcript_ID[!is.na(nano_m6A_wt_f$Transcript_ID)]]
+
+hg38_m6A_exon <- hg38_m6A[hg38_m6A$type == "exon"] %>% as.data.frame(.) %>%
+    group_by(transcript_id) %>% mutate(trans_len = sum(width)) %>%
+    makeGRangesFromDataFrame(., keep.extra.column = T)
+
+hg38_m6A$trans_len <- hg38_m6A_exon$trans_len[match(hg38_m6A$transcript_id,
+                                                    hg38_m6A_exon$transcript_id)]
+hg38_m6A_exon <- IRanges::reduce(hg38_m6A_exon)
+## split the exon into 1 nt
+hg38_m6A_exon <- GenomicRanges::tile(hg38_m6A_exon, width = 1) %>% unlist(.) 
+
+hg38_m6A <- hg38_m6A[order(hg38_m6A$level, hg38_m6A$transcript_support_level,
+                           -hg38_m6A$trans_len)]
+o <- findOverlaps(hg38_m6A_exon, hg38_m6A, select = "first")
+
+hg38_m6A_exon$Transcript_ID <- hg38_m6A$transcript_id[o]
+hg38_m6A_exon$kmer5 <- getSeq(Hsapiens, hg38_m6A_exon+2) %>% suppressWarnings()
+hg38_m6A_exon_drach <- hg38_m6A_exon[grep(DRACN, hg38_m6A_exon$kmer5)]
+
+## distance to SS
+hg38_m6A_exon_drach <- metaGeneProfile(hg38_m6A_exon_drach,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+hg38_m6A_exon_drach <- dis_to_SS(hg38_m6A_exon_drach, hg38_m6A)
+hg38_m6A_exon_drach_f <- hg38_m6A_exon_drach[which(hg38_m6A_exon_drach$dis_SS >= 200)]
+
+hg38_m6A_exon_drach_f$is.m6A <- ifelse(hg38_m6A_exon_drach_f %over% nano_m6A_wt_f, T, F)
+
+df <- as.data.frame(hg38_m6A_exon_drach_f) %>% group_by(is.m6A, kmer5) %>%
+    summarise(number = n(), .groups = "drop")
+df_1 <- df[df$is.m6A == T,]
+df$m6A_number <- df_1$number[match(df$kmer5, df_1$kmer5)]
+df <- df[df$is.m6A == F,]
+df$all_number <- df$m6A_number+df$number
+
+df$m6A_ratio <- df$m6A_number/df$all_number
+df <- df[order(df$m6A_ratio, decreasing = T),]
+df$kmer5 <- factor(df$kmer5, levels = df$kmer5)
+
+saveRDS(df, paste0(path.to.data, "m6A_ratio_nanopore_HEK.rds"))
+```
+
+```{r fig.height=5, fig.width=5}
+m6A_ratio_nano <- readRDS(paste0(path.to.data, "m6A_ratio_nanopore_HEK.rds"))
+
+m6A_ratio_nano$log2_all_motif <- log2(m6A_ratio_nano$all_number)
+m6A_ratio_nano$GGACN <- ifelse(substr(m6A_ratio_nano$kmer5,1,4) == "GGAC", T, F)
+
+m6A_ratio_nano <- m6A_ratio_nano[order(m6A_ratio_nano$m6A_ratio, decreasing = T),]
+
+ggplot(m6A_ratio_nano, aes(x = log2_all_motif, y = m6A_ratio, label = kmer5, 
+                      color = GGACN)) + 
+    geom_point() + 
+    ggrepel::geom_text_repel(show.legend = F) + 
+    labs(y = "m6A/A ratio", 
+         x = "Number of the DRACH motif on m6A containing transcripts (log2)",
+         title = "DRACH motif in vivo methylation ratio (HEK Nanopore)")
+```
+
+\FloatBarrier
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

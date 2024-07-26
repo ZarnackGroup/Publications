@@ -1,0 +1,1372 @@
+---
+title: "02 discovering two m6A degradation pathways"
+author: "You Zhou"
+date: "`r format(Sys.time(), '%B %e, %Y')`"
+output:
+  bookdown::pdf_document2:
+    keep_tex: yes
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: no
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    toc_collapsed: yes
+    fig_width: 8 
+    fig_height: 4 
+graphics: yes
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+geometry: margin=1in
+fontsize: 18pt
+---
+
+```{r knitr off, echo=FALSE, message=FALSE,cache=FALSE, results="hide", render=FALSE ,warning=FALSE}
+knitr::opts_chunk$set(echo=F, error=FALSE, warning=FALSE,message=FALSE,crop=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(xlsx)
+library(keras)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(tidyverse)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(adabag)
+library(rtracklayer)
+library(Rsamtools)
+library(ranger)
+library(cliProfiler)
+library(ggpointdensity)
+library(tensorflow)
+library(keras)
+library(Rtsne)
+library(patchwork)
+library(ggthemr)
+library(ggpubr)
+library(ggrastr)
+library(forcats)
+library(ComplexHeatmap)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#E41A1C"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold"),
+      axis.title.x=element_text(size = font_szie, face="bold"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90),
+      plot.title = element_text(size = font_szie, face="bold"),
+      legend.text = element_text(size = font_szie, face="bold"),
+      legend.title = element_text(size = font_szie, face="bold"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"))
+)
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = 1))
+update_geom_defaults("hline",   list(color = "#993404", size = 1))
+update_geom_defaults("abline",   list(color = "#993404", size = 1))
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+```
+
+# Introduction
+This script collects codes for generating plots that related to the discovery of CDS-m6A mediated 
+decay.
+
+```{r}
+## Data loading ##
+## thresholds
+basemean <- 10
+padj <- 0.05
+
+## data loading
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+## loading GLORI m6A sites
+m6A_hek_glori <- 
+    readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+
+## loading miCLIP m6A sites
+m6A_hek_miCLIP <- readRDS(paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+
+## keep the m6A sites which can be assign to gene and transcript location for the following analysis
+m6A_hek_glori <- m6A_hek_glori[m6A_hek_glori$location != "NO"]
+m6A_hek_miCLIP <- m6A_hek_miCLIP[m6A_hek_miCLIP$location != "NO"]
+## Calculate m6A number for each gene and genomic region
+m6A_number_glori <- as.data.frame(m6A_hek_glori) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop") %>%
+    mutate(bin_m6A = cut(.$number, breaks = c(0,3,6,9,12,Inf)))
+m6A_number_miCLIP <- as.data.frame(m6A_hek_miCLIP) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop") %>%
+    mutate(bin_m6A = cut(.$number, breaks = c(0,2,4,6,8,Inf)))
+## reset level cor the location to keep the right order in the plots
+m6A_number_glori$location <- factor(m6A_number_glori$location, levels = c("UTR5", "CDS", "UTR3"))
+m6A_number_miCLIP$location <- factor(m6A_number_miCLIP$location, levels = c("UTR5", "CDS", "UTR3"))
+
+## HEK HLs data
+HEK_hls <- read.csv(paste0(path.to.data, "HEK.4SU.HL.one.csv"))
+HEK_hls_2 <- read.csv(paste0(path.to.data, "HEK.4SU.HL.two.csv"))
+
+## load annotation file
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+
+## calculate mean HLs and assign gene_id
+HEK_hls$gene_id <- hg38$gene_id[match(HEK_hls$X, hg38$gene_name)]
+HEK_hls$std_2 <- HEK_hls_2$std[match(HEK_hls$X, HEK_hls_2$X)]
+HEK_hls$hl_hek <- (HEK_hls$std+HEK_hls$std_2)/2
+## keep the rows with HLs value in both replicates
+HEK_hls <- HEK_hls[!is.na(HEK_hls$std & HEK_hls$std_2),]
+## bin the HLs
+HEK_hls$bin_hl_hek <- cut(HEK_hls$hl_hek, breaks = c(0,1,2,3,4,Inf))
+```
+
+---
+
+# Half lives boxplot
+This plot shows the transcripts with big amount of CDS m6A sites have a lower half lives (HLs).
+
+## HEK293T
+
+```{r fig.height=3, fig.width=6}
+## assign the HLs to gene with m6A sites (GLORI)
+m6A_number_glori$hl_hek <- HEK_hls$hl_hek[match(m6A_number_glori$Gene_ID, HEK_hls$gene_id)]
+ggplot(m6A_number_glori, 
+       aes(x = location, y = hl_hek, fill = bin_m6A)) + 
+           geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,8)) +
+    labs(x = NULL, y = "HLs in HEK", fill = "m6A number", title = "HEK293T GLORI") + 
+    geom_hline(yintercept = 1.87, linetype = 2) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+```{r fig.height=3, fig.width=6}
+## assign the HLs to gene with m6A sites (miCLIP)
+m6A_number_miCLIP$hl_hek <- HEK_hls$hl_hek[match(m6A_number_miCLIP$Gene_ID, HEK_hls$gene_id)]
+ggplot(m6A_number_miCLIP, 
+       aes(x = location, y = hl_hek, fill = bin_m6A)) + 
+           geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,8)) +
+    labs(x = NULL, y = "HLs in HEK", fill = "m6A number", title = "HEK293T miCLIP") + 
+    geom_hline(yintercept = 1.87, linetype = 2) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+\FloatBarrier
+
+## mESC
+
+```{r}
+## loading mESC data
+m6A_mESC_miCLIP <- readRDS(paste0(path.to.data, "mouse_m6A.rds"))
+## assign m6A sites to gene and genomic locations
+m6A_mESC_miCLIP <- metaGeneProfile(m6A_mESC_miCLIP,
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+## save object for the reuse in other scripts
+saveRDS(m6A_mESC_miCLIP, paste0(path.to.data, "m6A_mESC_miCLIP_assigned.rds"))
+## keep m6A sites which can be assigned to CDS 3'UTR or 5'UTR
+m6A_mESC_miCLIP <- m6A_mESC_miCLIP[m6A_mESC_miCLIP$location != "NO"]
+## calculate m6A number in genomic regions
+m6A_number_mESC <- as.data.frame(m6A_mESC_miCLIP) %>% group_by(location, Gene_ID) %>%
+    summarise(number = n(), .groups = "drop")
+m6A_number_mESC$bin_m6A <- cut(m6A_number_mESC$number, breaks = c(0,2,4,6,Inf))
+m6A_number_mESC$location <- factor(m6A_number_mESC$location, levels = c("UTR5","CDS","UTR3"))
+
+## load hls data in mESC
+hl_mESC <- read.table("~/Desktop/Data/mESC half life/halflife_changes_WTvsKO.txt", 
+                        header = T)
+mm10 <- import.gff3("~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")
+## assign gene id to hl data
+hl_mESC$gene_ID <- mm10$gene_id[match(hl_mESC$gene_id, mm10$gene_name)]
+## keep the result with gene ID
+hl_mESC <- hl_mESC[!is.na(hl_mESC$gene_ID),]
+```
+
+```{r fig.height=3, fig.width=6}
+## assign hls
+m6A_number_mESC$hl_WT <- hl_mESC$halflife_WT.h.[match(m6A_number_mESC$Gene_ID, hl_mESC$gene_ID)]
+
+ggplot(m6A_number_mESC, 
+       aes(x = location, y = hl_WT, fill = bin_m6A)) + 
+           geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,12)) +
+    labs(x = NULL, y = "HLs in mESC", fill = "m6A number", title = "mESC miCLIP") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+\FloatBarrier
+
+# The LFC upon STM2457 correlates to the m6A number
+This section contains codes to generate the boxplots which show the log2 fold change (LFC) upon 
+STM2457 correlates to the m6A number. 
+
+## mESC 
+
+```{r fig.height=3, fig.width=6}
+## load stm differential expression result
+da_stm_mESC <-
+    read_Anke_DA(paste0(path.to.data, "mESC_STM2457.vs.mESC_DMSO.csv"))
+## assign LFC to transcripts
+m6A_number_mESC$log2FC_stm <- da_stm_mESC$log2FC[match(
+    m6A_number_mESC$Gene_ID, da_stm_mESC$gene_id
+)]
+
+ggplot(m6A_number_mESC, 
+       aes(x = location, y = log2FC_stm, fill = bin_m6A)) + 
+           geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) +
+    labs(x = NULL, y = "LFC upon STM2457", fill = "m6A number", title = "mESC miCLIP") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+
+```{r fig.height=3, fig.width=6}
+## assign hl changes in mESC to genes
+m6A_number_mESC$log2FC_mettl3KO_hl <- hl_mESC$log2.KO.WT.[
+    match(m6A_number_mESC$Gene_ID, hl_mESC$gene_ID)
+]
+
+ggplot(m6A_number_mESC, 
+       aes(x = location, y = log2FC_mettl3KO_hl, fill = bin_m6A)) + 
+           geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-3,3.5)) +
+    labs(x = NULL, y = "LFC of half lives upon Mettl3 KO", fill = "m6A number", 
+         title = "mESC miCLIP") + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+\FloatBarrier
+
+### The LFC upon STM2457 in RNAseq correlates to the LFC of HLs upon Mettl3 KO
+
+```{r fig.height=3, fig.width=4}
+hl_mESC$log2FC_stm <- da_stm_mESC$log2FC[match(
+    hl_mESC$gene_ID, da_stm_mESC$gene_id
+)]
+
+ggplot(hl_mESC, aes(x = log2.KO.WT., y = log2FC_stm)) + 
+    ggrastr::rasterise(geom_point(alpha = 0.5), dpi = 600) + 
+    geom_smooth(method = "lm", linetype = 2) + 
+    stat_cor(method = "pearson") +
+    labs(y = "LFC upon STM2457 (RNAseq)",
+         x = "LFC upon Mettl3 KO (HLs)",
+         title = "LFC correlation between RNAseq and HLs")
+```
+
+\FloatBarrier
+
+## HEK293T
+
+```{r}
+## load STM DA result in HEK
+da_stm_6h <- 
+  read_Anke_DA(paste0(path.to.data, "sR18_STM.vs.sR18_DMSO.csv"))
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv"))
+da_stm_24h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_24h_STM2457.vs.HEK293T_24h_DMSO.csv"))
+
+## assign log2FC to gene (GLORI) 
+m6A_number_glori$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(m6A_number_glori$Gene_ID, da_stm_6h$gene_id)
+]
+m6A_number_glori$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(m6A_number_glori$Gene_ID, da_stm_9h$gene_id)
+]
+m6A_number_glori$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(m6A_number_glori$Gene_ID, da_stm_24h$gene_id)
+]
+## assign log2FC to gene (miCLIP)
+m6A_number_miCLIP$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_6h$gene_id)
+]
+m6A_number_miCLIP$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_9h$gene_id)
+]
+m6A_number_miCLIP$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_24h$gene_id)
+]
+```
+
+### MA plot for STM 6h
+
+```{r fig.height=5, fig.width=5}
+pvalue <- 0.05
+## identify the significantly regulated genes
+da_stm_6h$sig <- case_when(da_stm_6h$BH.adjusted.p.values < pvalue ~ "Sig",
+                           T ~ "No")
+## highlight the CGRRF1 gene
+da_stm_6h$sig[da_stm_6h$gene_name == "CGRRF1"] <- "CGRRF1"
+da_stm_6h$sig <- factor(da_stm_6h$sig, levels = c("CGRRF1", "Sig", "No"))
+## make the dots in MA plot in a right order
+da_stm_6h <- da_stm_6h[order(da_stm_6h$sig, decreasing = T),]
+
+
+ggplot(da_stm_6h, aes(x = log2(baseMean), y = log2FC, color = sig)) + 
+    geom_point() +
+    ggrepel::geom_label_repel(data = da_stm_6h[da_stm_6h$gene_name == "CGRRF1",],
+               aes(x = log2(baseMean), y = log2FC, label = gene_name),
+               show.legend = F, size=3, segment.size=0.25, nudge_x=0.5, direction="y", hjust=0) + 
+    labs(y = "LFC upon STM 6h") + 
+    scale_color_manual(values = c("red", "lightblue", "black"))
+```
+
+```{r fig.height=5, fig.width=5}
+## Since 
+df <- da_stm_6h
+df$log10_padj <- -log10(df$BH.adjusted.p.values)
+df$log10_padj[df$log10_padj > 60] <- Inf
+
+ggplot(df, aes(y = log10_padj, x = log2FC, color = sig)) + 
+    geom_point() +
+    ggrepel::geom_label_repel(data = df[df$gene_name == "CGRRF1",],
+               aes(y = log10_padj, x = log2FC, label = gene_name),
+               show.legend = F, size=3, segment.size=0.25, nudge_x=0.5, direction="y", hjust=0) + 
+    labs(y = "-log10(adjusted pvalue)") + 
+    scale_color_manual(values = c("red", "lightblue", "black")) + 
+    coord_cartesian(ylim = c(0,60))
+```
+
+### GLORI boxplot to show the relation between m6A number and LFC upon STM treatment
+
+```{r fig.height=3, fig.width=6}
+## STM 6h
+ggplot(m6A_number_glori, aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 6h", fill = "m6A number", title = "HEK GLORI STM2457 6h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r fig.height=3, fig.width=6}
+## STM 9h
+ggplot(m6A_number_glori, aes(x = location, y = log2FC_stm_9h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 9h", fill = "m6A number", title = "HEK GLORI STM2457 9h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r fig.height=3, fig.width=6}
+## STM 24h
+ggplot(m6A_number_glori, aes(x = location, y = log2FC_stm_24h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 24h", fill = "m6A number", title = "HEK GLORI STM2457 24h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+\FloatBarrier
+
+## STM treatment for control the 3'UTR m6A number
+
+```{r}
+m6A_number_glori_cds <- m6A_number_glori[m6A_number_glori$location == "CDS",]
+m6A_number_glori_utr3 <- m6A_number_glori[m6A_number_glori$location == "UTR3",]
+
+m6A_number_glori_cds$bin_m6A_utr3 <- m6A_number_glori_utr3$bin_m6A[
+    match(m6A_number_glori_cds$Gene_ID, m6A_number_glori_utr3$Gene_ID)
+] %>% as.character(.)
+m6A_number_glori_utr3$bin_m6A_cds <- m6A_number_glori_cds$bin_m6A[
+    match(m6A_number_glori_utr3$Gene_ID, m6A_number_glori_cds$Gene_ID)
+]%>% as.character(.)
+m6A_number_glori_cds$bin_m6A_utr3[is.na(m6A_number_glori_cds$bin_m6A_utr3)] <- "0"
+m6A_number_glori_utr3$bin_m6A_cds[is.na(m6A_number_glori_utr3$bin_m6A_cds)] <- "0"
+m6A_number_glori_cds$bin_m6A_utr3 <- factor(m6A_number_glori_cds$bin_m6A_utr3,
+     levels = c("0", "(0,3]", "(3,6]", "(6,9]", "(9,12]", "(12,Inf]"))
+m6A_number_glori_utr3$bin_m6A_cds <- factor(m6A_number_glori_utr3$bin_m6A_cds,
+     levels = c("0", "(0,3]", "(3,6]", "(6,9]", "(9,12]", "(12,Inf]"))
+```
+
+```{r fig.height=9, fig.width=6}
+## control 3'UTR m6A number
+p1 <- ggplot(m6A_number_glori_cds, aes(x = bin_m6A_utr3, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "3'UTR m6A number", y = "LFC upon STM2457 6h", fill = "CDS m6A number", 
+         title = "HEK GLORI STM2457 6h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p2 <- ggplot(m6A_number_glori_cds, aes(x = bin_m6A_utr3, y = log2FC_stm_9h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "3'UTR m6A number", y = "LFC upon STM2457 9h", fill = "CDS m6A number", 
+         title = "HEK GLORI STM2457 9h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p3 <- ggplot(m6A_number_glori_cds, aes(x = bin_m6A_utr3, y = log2FC_stm_24h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "3'UTR m6A number", y = "LFC upon STM2457 24h", fill = "CDS m6A number", 
+         title = "HEK GLORI STM2457 24h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1/p2/p3
+```
+
+```{r fig.height=9, fig.width=6}
+## control CDS m6A number
+p1 <- ggplot(m6A_number_glori_utr3, aes(x = bin_m6A_cds, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "CDS m6A number", y = "LFC upon STM2457 6h", fill = "3'UTR m6A number", 
+         title = "HEK GLORI STM2457 6h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p2 <- ggplot(m6A_number_glori_utr3, aes(x = bin_m6A_cds, y = log2FC_stm_9h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "CDS m6A number", y = "LFC upon STM2457 9h", fill = "3'UTR m6A number", 
+         title = "HEK GLORI STM2457 9h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p3 <- ggplot(m6A_number_glori_utr3, aes(x = bin_m6A_cds, y = log2FC_stm_24h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = "CDS m6A number", y = "LFC upon STM2457 24h", fill = "3'UTR m6A number", 
+         title = "HEK GLORI STM2457 24h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1/p2/p3
+```
+
+\FloatBarrier
+
+## mESC STM
+
+```{r fig.height=9, fig.width=3}
+path.file <- "~/Desktop/Data/time_stm/sizeFactors.allGenes/"
+files <- list.files(path.file, pattern = "O.csv")
+da_stm_3h_mESC <- read_Anke_DA(paste0(path.file, files[[grep("3h",files)]]))
+da_stm_6h_mESC <- read_Anke_DA(paste0(path.file, files[[grep("6h",files)]]))
+da_stm_12h_mESC <- read_Anke_DA(paste0(path.file, files[[grep("12h",files)]]))
+
+m6A_number_mESC$log2FC_stm_3h <- da_stm_3h_mESC$log2FC[match(m6A_number_mESC$Gene_ID,
+                                                             da_stm_3h_mESC$gene_id)]
+m6A_number_mESC$log2FC_stm_6h <- da_stm_6h_mESC$log2FC[match(m6A_number_mESC$Gene_ID,
+                                                             da_stm_6h_mESC$gene_id)]
+m6A_number_mESC$log2FC_stm_12h <- da_stm_12h_mESC$log2FC[match(m6A_number_mESC$Gene_ID,
+                                                             da_stm_12h_mESC$gene_id)]
+
+p1 <- ggplot(m6A_number_mESC, aes(x = location, y = log2FC_stm_3h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 3h", fill = "m6A number", title = "mESC miCLIP STM 3h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p2 <- ggplot(m6A_number_mESC, aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 6h", fill = "m6A number", title = "mESC miCLIP STM 6h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p3 <- ggplot(m6A_number_mESC, aes(x = location, y = log2FC_stm_12h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 12h", fill = "m6A number", title = "mESC miCLIP STM 12h") + 
+    geom_hline(yintercept = 3.5, linetype = 2) +
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+p1/p2/p3
+```
+
+\FloatBarrier
+
+### miCLIP
+
+```{r fig.height=3, fig.width=6}
+## STM 6h
+ggplot(m6A_number_miCLIP, aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 6h", fill = "m6A number", title = "HEK miCLIP STM2457 6h") + 
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r fig.height=3, fig.width=6}
+## STM 9h
+ggplot(m6A_number_miCLIP, aes(x = location, y = log2FC_stm_9h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 9h", fill = "m6A number", title = "HEK miCLIP STM2457 9h") + 
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r fig.height=3, fig.width=6}
+## STM 24h
+ggplot(m6A_number_miCLIP, aes(x = location, y = log2FC_stm_24h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457 24h", fill = "m6A number", title = "HEK miCLIP STM2457 24h") + 
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+\FloatBarrier
+
+# Using Boruta to confirm that the CDS m6A number have a different influence to the degradation than UTR m6A number
+
+```{r eval=FALSE, include=TRUE}
+library(Boruta)
+## function to make boruta result from DA and m6A number table
+boruta_from_DA <- function(da, m6A_number, seed = 11){
+    data <- data.frame(gene_id = da$gene_id,
+                       log2FC = da$log2FC)
+    tmp_utr5 <- m6A_number[m6A_number$location == "UTR5",]
+    tmp_cds  <- m6A_number[m6A_number$location == "CDS",]
+    tmp_utr3 <- m6A_number[m6A_number$location == "UTR3",]
+    
+    data$n_m6A_UTR5 <- tmp_utr5$number[match(data$gene_id, tmp_utr5$Gene_ID)]
+    data$n_m6A_CDS  <- tmp_cds$number[match(data$gene_id, tmp_cds$Gene_ID)]
+    data$n_m6A_UTR3 <- tmp_utr3$number[match(data$gene_id, tmp_utr3$Gene_ID)]
+    
+    ## replace NA to 0
+    data[is.na(data)] <- 0
+    data$gene_id <- NULL
+    ## remove genes without m6A
+    data <- data[rowSums(data[,2:4] == 0) < 3,]
+    set.seed(seed)
+    boruta_output <- Boruta(log2FC ~ ., data=na.omit(data), doTrace=0)
+    return(boruta_output)
+}
+## mESC
+boruta_mESC <- boruta_from_DA(da_stm_mESC, m6A_number_mESC)
+saveRDS(boruta_mESC, paste0(path.to.data, "boruta_mESC_RNAseq_m6A_number.rds"))
+
+## HEK
+boruta_stm_6h_miCLIP <- boruta_from_DA(da_stm_6h, m6A_number_miCLIP)
+saveRDS(boruta_stm_6h_miCLIP, paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_6h.rds"))
+        
+boruta_stm_9h_miCLIP <- boruta_from_DA(da_stm_9h, m6A_number_miCLIP)
+saveRDS(boruta_stm_9h_miCLIP, paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_9h.rds"))
+        
+boruta_stm_24h_miCLIP <- boruta_from_DA(da_stm_24h, m6A_number_miCLIP)
+saveRDS(boruta_stm_24h_miCLIP, paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_24h.rds"))
+
+## C643
+C643_m6A <- readRDS(paste0(path.to.data, "C643_m6A.rds"))
+C643_m6A <- metaGeneProfile(C643_m6A,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+saveRDS(C643_m6A, paste0(path.to.data, "C643_m6A_assigned.rds"))
+da_stm_c643 <- 
+    read_Anke_DA(paste0(path.to.data, "C643_STM2457.vs.C643_DMSO.csv"))
+
+m6A_number_C643 <- C643_m6A %>% as.data.frame(.) %>%
+    group_by(location, Gene_ID) %>% summarise(number = n(), .groups = "drop")
+
+boruta_C643 <- boruta_from_DA(da_stm_c643, m6A_number_C643)
+saveRDS(boruta_C643, paste0(path.to.data, "boruta_C643_RNAseq_m6A_number_STM.rds"))
+```
+
+```{r}
+plot_boruta <- function(boruta_output, title = ""){
+    boruta_output_importance <- 
+        boruta_output$finalDecision %>%
+        as.data.frame()
+    dd <- data.frame(. = c(rep("Shadow", 3)))
+    rownames(dd) <- c("shadowMax", "shadowMean", "shadowMin")
+    boruta_output_importance <- rbind(boruta_output_importance, dd)
+    df <- as.data.frame(boruta_output$ImpHistory)
+    boruta_output <- 
+        df[,colnames(df) %in% c(rownames(boruta_output_importance))]
+    k <- boruta_output
+    k[k == -Inf] <- 0
+    ord <- apply(k, 2, median)
+    ord <- ord[order(ord, decreasing = T)]
+    df <- data.frame(value = 0, 
+                     feature = "a")
+    for (i in 1:ncol(boruta_output)) {
+        df2 <- data.frame(value = boruta_output[,i],
+                          feature = colnames(boruta_output)[i])
+        df <- rbind(df, df2)
+    }
+    
+    df <- df[-1,]
+    df$feature <- factor(df$feature, levels = names(ord))
+    df$Sig <- boruta_output_importance$.[
+        match(df$feature, rownames(boruta_output_importance))
+    ]
+    df_RPE1 <- df
+    dd <- df %>% group_by(df$feature) %>%
+      summarise(mean = mean(value))
+    dd$seq <- substr(dd$`df$feature`, 1, 2)
+    a <- ifelse(dd$seq == "n_", "red", "black")
+    
+    df$feature <- as.character(df$feature)
+    df$feature[df$feature == "n_m6A_CDS"] <- "CDS m6A"
+    df$feature[df$feature == "n_m6A_UTR3"] <- "3'UTR m6A"
+    df$feature[df$feature == "n_m6A_UTR5"] <- "5'UTR m6A"
+    df$feature <- factor(df$feature, 
+                         levels = c("CDS m6A", "3'UTR m6A", "5'UTR m6A",
+                                    "shadowMax", "shadowMean", "shadowMin"))
+    df$Sig <- factor(df$Sig, levels = c("Confirmed", "Shadow", "Tentative", "Rejected"))
+    
+    ggplot(df, aes(x = feature, y = value, fill = Sig)) + 
+        geom_boxplot(outlier.shape = NA) +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+      ggtitle(title) + 
+      labs(y = "Importance", x = NULL)
+}
+```
+
+```{r fig.height=9, fig.width=6}
+boruta_mESC <- readRDS(paste0(path.to.data, "boruta_mESC_RNAseq_m6A_number.rds"))
+boruta_stm_6h <- readRDS(paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_6h.rds"))
+boruta_stm_9h <- readRDS(paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_9h.rds"))
+boruta_stm_24h <- readRDS(paste0(path.to.data, "boruta_HEK_RNAseq_m6A_number_24h.rds"))
+boruta_C643 <- readRDS(paste0(path.to.data, "boruta_C643_RNAseq_m6A_number_STM.rds"))
+
+p1 <- plot_boruta(boruta_mESC, "Boruta for mESC RNAseq")
+p2 <- plot_boruta(boruta_stm_6h, "Boruta for HEK STM 6h RNAseq")
+p3 <- plot_boruta(boruta_stm_9h, "Boruta for HEK STM 9h RNAseq")
+p4 <- plot_boruta(boruta_stm_24h, "Boruta for HEK STM 24h RNAseq")
+p5 <- plot_boruta(boruta_C643, "Boruta for C643 STM RNAseq")
+
+(p1+p2)/(p3+p4)/(p5+p5)
+```
+
+\FloatBarrier
+
+### RNAseq box plot for C643
+
+```{r}
+## miCLIP result in C643
+m6A_C643_miCLIP <- readRDS(paste0(path.to.data, "C643_m6A_assigned.rds"))
+da_stm_c643 <- 
+    read_Anke_DA(paste0(path.to.data, "C643_STM2457.vs.C643_DMSO.csv"))
+
+m6A_number_C643 <- m6A_C643_miCLIP %>% as.data.frame(.) %>%
+    group_by(location, Gene_ID) %>% summarise(number = n(), .groups = "drop")
+m6A_number_C643$log2FC_stm <- da_stm_c643$log2FC[match(
+    m6A_number_C643$Gene_ID, da_stm_c643$gene_id
+)]
+m6A_number_C643$bin_m6A <- cut(m6A_number_C643$number, breaks = c(0,2,4,6,Inf))
+m6A_number_C643 <- m6A_number_C643[m6A_number_C643$location != "NO",]
+m6A_number_C643$location <- factor(m6A_number_C643$location, levels = c("UTR5", "CDS", "UTR3"))
+
+ggplot(m6A_number_C643, 
+       aes(x = location, y = log2FC_stm, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    labs(x = NULL, y = "LFC upon STM2457", fill = "m6A number", title = "C643 miCLIP STM2457") + 
+    scale_fill_brewer(palette="Oranges") + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+\FloatBarrier
+
+## SHAP
+
+```{r eval=FALSE, include=FALSE}
+library(treeshap)
+## making data for shap
+data <- data.frame(gene_id = da_stm_6h$gene_id,
+                   log2FC = da_stm_6h$log2FC)
+tmp_utr5 <- m6A_number_miCLIP[m6A_number_miCLIP$location == "UTR5",]
+tmp_cds  <- m6A_number_miCLIP[m6A_number_miCLIP$location == "CDS",]
+tmp_utr3 <- m6A_number_miCLIP[m6A_number_miCLIP$location == "UTR3",]
+
+data$n_m6A_UTR5 <- tmp_utr5$number[match(data$gene_id, tmp_utr5$Gene_ID)]
+data$n_m6A_CDS  <- tmp_cds$number[match(data$gene_id, tmp_cds$Gene_ID)]
+data$n_m6A_UTR3 <- tmp_utr3$number[match(data$gene_id, tmp_utr3$Gene_ID)]
+
+## replace NA to 0
+data[is.na(data)] <- 0
+data$gene_id <- NULL
+
+data <- data[rowSums(data[,2:4] == 0) < 3,]
+## SHAP analysis
+train <- data %>% na.omit(.)
+set.seed(9)
+model_tree <- ranger(log2FC~ ., data = na.omit(train), importance = "permutation", seed = 9)
+unified <- ranger.unify(model_tree, train)
+saveRDS(train, "rds/data.rds")
+saveRDS(unified, "rds/unified.rds")
+
+## the treeshap step take very long and require a big amount of memery. It needs to be run on cluster
+treeshap <- treeshap(unified,  train, interactions = T, verbose = 0)
+```
+
+```{r fig.height=3, fig.width=6}
+library(treeshap)
+treeshap1 <- readRDS(paste0(path.to.data, "treeshap.rds"))
+plot_contribution(treeshap1, obs = 1)
+```
+
+```{r fig.height=3, fig.width=6}
+plot_feature_importance(treeshap1,title = "STM2457 6h HEK293T")
+```
+
+```{r eval=FALSE, include=FALSE}
+## Model performance
+data <- data.frame(gene_id = da_stm_6h$gene_id,
+                   log2FC = da_stm_6h$log2FC)
+tmp_utr5 <- m6A_number_miCLIP[m6A_number_miCLIP$location == "UTR5",]
+tmp_cds  <- m6A_number_miCLIP[m6A_number_miCLIP$location == "CDS",]
+tmp_utr3 <- m6A_number_miCLIP[m6A_number_miCLIP$location == "UTR3",]
+
+data$n_m6A_UTR5 <- tmp_utr5$number[match(data$gene_id, tmp_utr5$Gene_ID)]
+data$n_m6A_CDS  <- tmp_cds$number[match(data$gene_id, tmp_cds$Gene_ID)]
+data$n_m6A_UTR3 <- tmp_utr3$number[match(data$gene_id, tmp_utr3$Gene_ID)]
+
+## replace NA to 0
+data[is.na(data)] <- 0
+data$gene_id <- NULL
+
+data <- data[rowSums(data[,2:4] == 0) < 3,]
+set.seed(9)
+r <- sample(1:nrow(data), 700, replace = F)
+    
+## SHAP analysis
+train <- data[-r,] %>% na.omit(.)
+test <- data[r,]
+set.seed(9)
+model_tree <- ranger(log2FC~ ., data = na.omit(train), importance = "permutation", seed = 9)
+pred.res<- predict(model_tree, data = test[,-1])
+
+test$pred <- pred.res$predictions
+
+ggplot(test, aes(x = pred, y = log2FC)) + 
+    geom_point()
+```
+
+\FloatBarrier
+
+# LFC upon STM2457 around stop and start codon
+I use the following formula to normalized the log2FC to the range between 0 and 1.
+
+Zi = (Xi-min(X))/(max(X) - min(X))
+
+```{r}
+# calculation distance to start and stop codon
+## select the used transcripts for the anootation files
+hg38_glori <- hg38[hg38$transcript_id %in% m6A_hek_glori$Transcript_ID]
+# hg38_miclip <- hg38[hg38$transcript_id %in% m6A_hek_miCLIP$Transcript_ID]
+hg38_C643 <- hg38[hg38$transcript_id %in% m6A_C643_miCLIP$Transcript_ID]
+mm10_miCLIP <- mm10[mm10$transcript_id %in% m6A_mESC_miCLIP$Transcript_ID]
+
+## distance to start codon
+# m6A_hek_miCLIP <- start_codon_abs_profile(m6A_hek_miCLIP, hg38_miclip)
+m6A_hek_glori <- start_codon_abs_profile(m6A_hek_glori, hg38_glori)
+m6A_mESC_miCLIP  <- start_codon_abs_profile(m6A_mESC_miCLIP, mm10_miCLIP)
+m6A_C643_miCLIP <- start_codon_abs_profile(m6A_C643_miCLIP, hg38_C643)
+
+## distance to stop codon
+# m6A_hek_miCLIP <- sc_abs_profile(m6A_hek_miCLIP, hg38_miclip)
+m6A_hek_glori <- sc_abs_profile(m6A_hek_glori, hg38_glori)
+m6A_mESC_miCLIP  <- sc_abs_profile(m6A_mESC_miCLIP, mm10_miCLIP)
+m6A_C643_miCLIP <- sc_abs_profile(m6A_C643_miCLIP, hg38_C643)
+
+## calculate exon length
+m6A_hek_glori$exon_length <- abs(m6A_hek_glori$exon_start - m6A_hek_glori$exon_end)
+m6A_hek_glori$bin_exon_len <- cut(m6A_hek_glori$exon_length, 
+                                  breaks = c(0,300,1000,3000,5000,Inf))
+
+## LFC assignment
+# m6A_hek_miCLIP$log2FC_stm_6h <- da_stm_6h$log2FC[match(m6A_hek_miCLIP$Gene_ID, da_stm_6h$gene_id)]
+# m6A_hek_miCLIP$log2FC_stm_9h <- da_stm_9h$log2FC[match(m6A_hek_miCLIP$Gene_ID, da_stm_9h$gene_id)]
+# m6A_hek_miCLIP$log2FC_stm_24h <- da_stm_24h$log2FC[match(m6A_hek_miCLIP$Gene_ID,da_stm_24h$gene_id)]
+
+m6A_hek_glori$log2FC_stm_6h <- da_stm_6h$log2FC[match(m6A_hek_glori$Gene_ID, da_stm_6h$gene_id)]
+m6A_hek_glori$log2FC_stm_9h <- da_stm_9h$log2FC[match(m6A_hek_glori$Gene_ID, da_stm_9h$gene_id)]
+m6A_hek_glori$log2FC_stm_24h <- da_stm_24h$log2FC[match(m6A_hek_glori$Gene_ID,da_stm_24h$gene_id)]
+
+m6A_C643_miCLIP$log2FC_stm <- da_stm_c643$log2FC[match(m6A_C643_miCLIP$Gene_ID, da_stm_c643$gene_id)]
+
+m6A_mESC_miCLIP$log2FC_stm <- da_stm_mESC$log2FC[match(m6A_mESC_miCLIP$Gene_ID,da_stm_mESC$gene_id)]
+m6A_mESC_miCLIP$log2FC_M3KO_HL <- 
+    hl_mESC$log2.KO.WT.[match(m6A_mESC_miCLIP$Gene_ID, hl_mESC$gene_ID)]
+
+## normalization function
+normalize_0_1 <- function(x){
+  x$log2FC <- (x$log2FC-min(x$log2FC))/(max(x$log2FC)-min(x$log2FC))
+  return(x)
+}
+```
+
+## stop codon
+
+```{r}
+# plot around stop codon
+## mESC
+ex = 440
+bin_w = 40
+## for mESC m6A sites
+k <- m6A_mESC_miCLIP[which(abs(m6A_mESC_miCLIP$dist_to_sc) <= ex)]
+## use the m6A sites in CDS and UTR3 for the stop codon analysis
+k <- k[k$location %in% c("CDS", "UTR3")]
+k$Group <- cut(
+  as.numeric(k$dist_to_sc),
+  breaks = c(seq(-ex,ex,bin_w)))
+
+## keep m6A sites within the test region
+k <- k[!is.na(k$Group)]
+## keep the m6A sites with the LFC
+k <- k[!is.na(k$log2FC_M3KO_HL) | !is.na(k$log2FC_stm)]
+## make sure a gene can only present once in each Group (bin box)
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+hl_p <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_M3KO_HL, na.rm = T)) %>%
+  mutate(sample = "mESC(M3KO HL)")
+rna_mESC <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm, na.rm = T)) %>%
+  mutate(sample = "mESC(STM RNAseq)")
+
+hl_p <- normalize_0_1(hl_p)
+rna_mESC <- normalize_0_1(rna_mESC)
+
+## HEK
+k <- m6A_hek_glori[which(abs(m6A_hek_glori$dist_to_sc) <= ex)]
+k <- k[k$location %in% c("CDS", "UTR3")]
+k$Group <- cut(
+  as.numeric(k$dist_to_sc),
+  breaks = c(seq(-ex,ex,bin_w))
+)
+k <- k[!is.na(k$Group)]
+k <- k[!is.na(k$log2FC_stm_6h) | !is.na(k$log2FC_stm_9h) | !is.na(k$log2FC_stm_24h)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+rna_stm6h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_6h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM6h)")
+rna_stm9h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_9h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM9h)")
+rna_stm24h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_24h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM24h)")
+## normalization
+rna_stm6h <- normalize_0_1(rna_stm6h)
+rna_stm9h <- normalize_0_1(rna_stm9h)
+rna_stm24h <- normalize_0_1(rna_stm24h)
+
+## C643 miCLIP
+k <- m6A_C643_miCLIP[which(abs(m6A_C643_miCLIP$dist_to_sc) <= ex)]
+k <- k[k$location %in% c("CDS", "UTR3")]
+k$Group <- cut(
+  as.numeric(k$dist_to_sc),
+  breaks = c(seq(-ex,ex,bin_w))
+)
+k <- k[!is.na(k$Group)]
+k <- k[!is.na(k$log2FC_stm)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+rna_stm_C643 <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm, na.rm = T)) %>%
+  mutate(sample = "C643(STM)")
+rna_stm_C643 <- normalize_0_1(rna_stm_C643)
+
+## plotting
+df <- rbind(rna_mESC, rna_stm6h, rna_stm_C643, hl_p)
+ggplot(df, aes(x = Group, y = log2FC, color = sample, group = sample)) + 
+  geom_point() +
+  ggtitle("The profile for the log2FC around stop codon") + 
+  labs(x = "Distance to stop codon",
+       y = "Normalized median log2FC") +
+  geom_vline(xintercept = 12, linetype = 2) +
+  geom_smooth(method = "loess", se = F, formula = y ~ x) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+```{r}
+## comparison among different time point of STM in HEK
+## plotting
+df <- rbind(rna_stm6h, rna_stm9h, rna_stm24h)
+df$sample <- factor(df$sample, levels = c("HEK293T(STM6h)","HEK293T(STM9h)","HEK293T(STM24h)"))
+
+ggplot(df, aes(x = Group, y = log2FC, color = sample, group = sample)) + 
+  geom_point() +
+  ggtitle("The profile for the log2FC around stop codon") + 
+  labs(x = "Distance to stop codon",
+       y = "Normalized median log2FC") +
+  geom_vline(xintercept = 12, linetype = 2) +
+  geom_smooth(method = "loess", se = F, formula = y ~ x) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+\FloatBarrier
+
+## LFC around start codon
+
+```{r}
+st <- 200
+
+k <- m6A_mESC_miCLIP[which(abs(m6A_mESC_miCLIP$dist_to_start_co) <= ex)]
+## use the m6A sites in CDS and UTR5 for the start codon analysis
+k <- k[k$location %in% c("CDS", "UTR5")]
+k$Group <- cut(
+  as.numeric(k$dist_to_start_co),
+  breaks = c(seq(-st, ex, bin_w))
+)
+k <- k[!is.na(k$Group)]
+k <- k[!is.na(k$log2FC_M3KO_HL) | !is.na(k$log2FC_stm)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+hl_p <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_M3KO_HL, na.rm =T)) %>%
+  mutate(sample = "mESC(M3KO HL)")
+
+rna_mESC_2 <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm, na.rm =T)) %>%
+  mutate(sample = "mESC(STM RNAseq)")
+
+hl_p <- normalize_0_1(hl_p)
+rna_mESC_2 <- normalize_0_1(rna_mESC_2)
+
+## HEK
+k <- m6A_hek_glori[which(abs(m6A_hek_glori$dist_to_start_co) <= ex)]
+k <- k[k$location %in% c("CDS", "UTR5")]
+k$Group <- cut(
+  as.numeric(k$dist_to_start_co),
+  breaks = c(seq(-st, ex, bin_w))
+)
+k <- k[!is.na(k$Group)]
+k <- k[!is.na(k$log2FC_stm_6h) | !is.na(k$log2FC_stm_9h) | !is.na(k$log2FC_stm_24h)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+rna_stm6h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_6h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM6h)")
+rna_stm9h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_9h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM9h)")
+rna_stm24h <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm_24h, na.rm = T)) %>%
+  mutate(sample = "HEK293T(STM24h)")
+## normalization
+rna_stm6h <- normalize_0_1(rna_stm6h)
+rna_stm9h <- normalize_0_1(rna_stm9h)
+rna_stm24h <- normalize_0_1(rna_stm24h)
+
+## C643 miCLIP
+k <- m6A_C643_miCLIP[which(abs(m6A_C643_miCLIP$dist_to_start_co) <= ex)]
+k <- k[k$location %in% c("CDS", "UTR5")]
+k$Group <- cut(
+  as.numeric(k$dist_to_start_co),
+  breaks = c(seq(-st, ex, bin_w))
+)
+k <- k[!is.na(k$Group)]
+k <- k[!is.na(k$log2FC_stm)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+rna_stm_C643 <- as.data.frame(k) %>% group_by(Group) %>%
+  summarise(log2FC = median(log2FC_stm, na.rm = T)) %>%
+  mutate(sample = "C643(STM)")
+rna_stm_C643 <- normalize_0_1(rna_stm_C643)
+
+## plotting
+df <- rbind(rna_mESC_2, rna_stm6h, rna_stm_C643, hl_p)
+
+ggplot(df, aes(x = Group, y = log2FC, color = sample, group = sample)) + 
+  geom_point() +
+  ggtitle("The profile for the log2FC around start codon") + 
+  labs(x = "Distance to start codon",
+       y = "Normalized median log2FC") +
+  geom_vline(xintercept = 5, linetype = 2) +
+  geom_smooth(method = "loess", se = F, formula = y ~ x) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+```{r}
+## comparison among different time point of STM in HEK
+## plotting
+df <- rbind(rna_stm6h, rna_stm9h, rna_stm24h)
+df$sample <- factor(df$sample, levels = c("HEK293T(STM6h)","HEK293T(STM9h)","HEK293T(STM24h)"))
+
+ggplot(df, aes(x = Group, y = log2FC, color = sample, group = sample)) + 
+  geom_point() +
+  ggtitle("The profile for the log2FC around start codon") + 
+  labs(x = "Distance to start codon",
+       y = "Normalized median log2FC") +
+  geom_vline(xintercept = 5, linetype = 2) +
+  geom_smooth(method = "loess", se = F, formula = y ~ x) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+\FloatBarrier
+
+# The m6A sites after last splice sites and on the long exon have a stronger effect on degradation
+
+```{r fig.height=3, fig.width=6}
+## calculate the distance to last SS with in-house function
+m6A_hek_glori <- last_ss_profile(m6A_hek_glori, hg38_glori)
+## take only the sites in CDS
+m6A_number_glori_cds <- m6A_number_glori[m6A_number_glori$location == "CDS",]
+m6A_hek_glori$CDS_m6A <- m6A_number_glori_cds$bin_m6A[match(
+    m6A_hek_glori$Gene_ID, m6A_number_glori_cds$Gene_ID)]
+
+## use only the CDS m6A sites for the analysis
+m6A_hek_glori_cds <- m6A_hek_glori[m6A_hek_glori$location == "CDS"]
+as.data.frame(m6A_hek_glori_cds[!is.na(m6A_hek_glori_cds$bin_exon_len)]) %>% 
+    group_by(bin_exon_len, Gene_ID, CDS_m6A) %>%
+    filter(row_number() == 1) %>%
+    ggplot(., aes(fill = bin_exon_len, y = log2FC_stm_6h, x = CDS_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    geom_hline(yintercept = 0, linetype = 2) +
+    labs(title = "The m6A sites located on a long exon have bigger effect on degradation",
+         fill = "Exon length", x = "CDS m6A number")
+```
+
+\FloatBarrier
+
+## The m6A sites behind last SS and have more than 200nt to the stop codon have a strong effect on degradation
+
+```{r fig.height=3, fig.width=6}
+## make sure the m6A are assigned to exon
+m6A_hek_glori_f <- m6A_hek_glori[!is.na(m6A_hek_glori$exon_number)]
+## make sure we use the m6A sites which are assigned to the same transcript ID
+m6A_hek_glori_f <- m6A_hek_glori_f[m6A_hek_glori_f$Transcript_ID_ss == m6A_hek_glori_f$Transcript_ID]
+m6A_hek_glori_f <- m6A_hek_glori_f[
+    which(m6A_hek_glori_f$Transcript_ID_stop == m6A_hek_glori_f$Transcript_ID)]
+## calculate the relative number of located exon to the exon with last SS
+m6A_hek_glori_f$Number_exon2lastSS <- m6A_hek_glori_f$last_ss_e_number - m6A_hek_glori_f$exon_number
+
+m6A_hek_glori_f$exon2lastSS <- case_when(m6A_hek_glori_f$Number_exon2lastSS > 0 ~ "Before last SS",
+                                       m6A_hek_glori_f$Number_exon2lastSS == 0 ~ "At last CDS exon",
+                                       m6A_hek_glori_f$Number_exon2lastSS < 0 ~ "3'UTR")
+m6A_hek_glori_f$exon2lastSS[m6A_hek_glori_f$exon2lastSS == "At last CDS exon"] <- 
+    ifelse(m6A_hek_glori_f$dist_to_sc[m6A_hek_glori_f$exon2lastSS == "At last CDS exon"]  <= -200, 
+           "Last SS exon 200nt away stop codon",
+           "Last SS exon close to stop codon")
+m6A_hek_glori_f <- m6A_hek_glori_f[!is.na(m6A_hek_glori_f$exon_length)]
+m6A_hek_glori_f$exon2lastSS[m6A_hek_glori_f$exon2lastSS == "Before last SS"] <- ifelse(
+    m6A_hek_glori_f$exon_length[m6A_hek_glori_f$exon2lastSS == "Before last SS"] > 3000,
+    "On long internal exon", "On short internal exon")
+
+df <- as.data.frame(m6A_hek_glori_f[m6A_hek_glori_f$location %in% c("CDS", "UTR3")]) %>% 
+    group_by(Gene_ID, exon2lastSS)%>% 
+    filter(row_number() == 1)
+
+p1 <- ggplot(df, aes(x = exon2lastSS)) + 
+    geom_bar() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(title = "CDS and 3'UTR m6A sites", x = NULL)
+
+p2 <- ggplot(df, aes(x = exon2lastSS, y= log2FC_stm_6h)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    coord_cartesian(ylim = c(-1, 1)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL)
+p1+p2
+```
+
+\FloatBarrier
+
+# Stoichiometry plots
+
+## The number of m6A sites in different genomic regions with GLORI
+
+```{r fig.height=3, fig.width=3}
+df_number <- as.data.frame(table(m6A_hek_glori$location)) 
+df_number$Var1 <- factor(df_number$Var1, levels = c("UTR5", "CDS", "UTR3"))
+ggplot(df_number, aes(x = Var1, y = Freq, label = Freq)) + 
+    geom_col() + 
+    geom_text(vjust = -0.2) + 
+    labs(x = NULL, y = "m6A number", title = "m6A number in different transcript regions (GLORI)")
+```
+
+```{r}
+m6A_hek_glori_ff <- m6A_hek_glori[m6A_hek_glori$location != "NO"]
+m6A_hek_glori_ff$location <- factor(m6A_hek_glori_ff$location, levels = c("UTR5", "CDS", "UTR3"))
+my_comparisons <- list(c("UTR5", "CDS"), 
+                       c("CDS", "UTR3"),
+                       c("UTR5", "UTR3"))
+
+ggplot(as.data.frame(m6A_hek_glori_ff),
+       aes(x = location, y = m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "Stoichiometry", x = NULL)  + 
+  stat_compare_means(comparisons = my_comparisons, label.y = c(1,1.05,1.1),
+                     method = "wilcox.test")
+```
+
+## Stoichiometry distribution across transcripts
+
+```{r fig.height=3, fig.width=6}
+m6A_hek_glori$Position[m6A_hek_glori$location == "CDS"] <- 
+    m6A_hek_glori$Position[m6A_hek_glori$location == "CDS"] + 1
+m6A_hek_glori$Position[m6A_hek_glori$location == "UTR3"] <- 
+    m6A_hek_glori$Position[m6A_hek_glori$location == "UTR3"] + 2
+m6A_hek_glori$bin_position <- cut(m6A_hek_glori$Position, breaks = c(-0.1, seq(0,3,0.2),Inf),
+                           labels = c((seq(0,3,0.2)), "NO"))
+ggplot(as.data.frame(m6A_hek_glori), 
+       aes(x = bin_position, y = m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) +
+    ggtitle("GLORI m6A methylation") + 
+    labs(x = NULL) + 
+    scale_x_discrete(breaks = c("0.6", "1.6", "2.6"),labels = c("5'UTR", "CDS", "3'UTR")) + 
+    geom_vline(xintercept = c(6,11), linetype = 2)
+```
+
+## The correlation between sum of stoichiometry and LFC upon STM2457
+
+```{r}
+## calculate the sum of stoichiometry and make plot
+glori_sum_stoi <- as.data.frame(m6A_hek_glori) %>% group_by(Gene_ID, location) %>%
+    summarise(sum_stoi = sum(m6A_lvl_avg), .groups = "drop")
+## assign LFC upon STM6h
+glori_sum_stoi$log2FC_stm_6h <- da_stm_6h$log2FC[match(glori_sum_stoi$Gene_ID, da_stm_6h$gene_id)]
+## bin the sum of stoichiometry
+glori_sum_stoi$bin_stoi <- cut(glori_sum_stoi$sum_stoi, breaks = c(0,1,2,3,4,Inf))
+glori_sum_stoi$location <- factor(glori_sum_stoi$location, levels = c("UTR5", "CDS", "UTR3"))
+
+ggplot(glori_sum_stoi, aes(x = location, y = log2FC_stm_6h, fill = bin_stoi)) + 
+    geom_boxplot(outlier.shape = NA) +
+    scale_fill_brewer(palette="GnBu") + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    labs(fill = "Sum of stoichiometry", title = "STM2457 6h with sum of stoichiometry")
+```
+
+\FloatBarrier
+
+## Stoichiometry around stop codon
+
+```{r fig.height=3, fig.width=6}
+## set the region around stop codon to show
+k <- m6A_hek_glori[which(abs(m6A_hek_glori$dist_to_sc) <= ex)]
+## make sure the m6A are in CDS and 3'UTR
+k <- k[k$location %in% c("CDS", "UTR3")]
+## bin the m6A by distance to stop codon
+k$Group <- cut(
+  as.numeric(k$dist_to_sc),
+  breaks = c(seq(-ex,ex,bin_w))
+)
+
+k <- k[!is.na(k$Group)]
+
+## for each gene in each distance group there is only one m6A are counted to avoid the bias
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+
+ggplot(k, aes(x = Group, y = m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL, y = "m6A stoichiometry", title = "Stoichiometry around stop codon")
+```
+
+\FloatBarrier
+
+## Stoichiometry around start codon
+
+```{r fig.height=3, fig.width=6}
+k <- m6A_hek_glori[which(abs(m6A_hek_glori$dist_to_start_co) <= ex)]
+k <- k[k$location %in% c("CDS", "UTR5")]
+k$Group <- cut(
+  as.numeric(k$dist_to_start_co),
+  breaks = c(seq(-st, ex, bin_w))
+)
+k <- k[!is.na(k$Group)]
+
+k <- as.data.frame(k) %>% group_by(Group, Gene_ID) %>%
+  filter(start == min(start))
+
+ggplot(k, aes(x = Group, y = m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL, y = "m6A stoichiometry", title = "Stoichiometry around start codon")
+```
+
+\FloatBarrier
+
+## Stoichiometry for m6A after last SS and on long exon
+
+```{r}
+ggplot(as.data.frame(m6A_hek_glori_f), aes(x = exon2lastSS, y= m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    geom_hline(yintercept = 0.47, linetype = 2)  + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL)
+```
+
+\FloatBarrier
+
+# The LFC upon STM based on the distance to the SS
+
+```{r}
+## extract the exon for calculating the transcript length
+used_hg38 <- hg38[hg38$type %in% c("exon")]
+## keep the transcript with m6A
+used_hg38 <- used_hg38[used_hg38$transcript_id %in% m6A_hek_glori$Transcript_ID]
+
+## calculate the transcript length
+transcript_length <- as.data.frame(used_hg38) %>%
+    group_by(transcript_id) %>% 
+    summarise(trans_len = sum(width)) 
+used_hg38$transcript_length <- transcript_length$trans_len[match(
+    used_hg38$transcript_id, transcript_length$transcript_id
+)]
+
+## make the hierarchy for m6A assignment
+used_hg38 <- used_hg38[order(used_hg38$level, used_hg38$transcript_support_level,
+                             -used_hg38$transcript_length)]
+
+used_hg38 <- as.data.frame(used_hg38) %>% group_by(transcript_id) %>%
+    mutate(exon_max = as.character(max(as.numeric(exon_number)))) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+```
+
+```{r}
+## calculating the distance to SS
+o <- findOverlaps(m6A_hek_glori, used_hg38, select = "first")
+m6A_hek_glori$exon_start <- start(used_hg38)[o]
+m6A_hek_glori$exon_end <- end(used_hg38)[o]
+m6A_hek_glori$exon_number <- used_hg38$exon_number[o]
+m6A_hek_glori$exon_max <- used_hg38$exon_max[o]
+## calculate the shortest distance to the splicing junction
+m6A_hek_glori$dis_1 <- abs(start(m6A_hek_glori) - m6A_hek_glori$exon_start)
+m6A_hek_glori$dis_2 <- abs(start(m6A_hek_glori) - m6A_hek_glori$exon_end)
+
+mcols(m6A_hek_glori) <- mcols(m6A_hek_glori) %>% as.data.frame %>% rowwise() %>%
+    mutate(dis_SS = min(dis_1, dis_2))
+
+## assign the distance to 3' and 5' SS
+m6A_hek_glori$dis_3SS <- 0
+m6A_hek_glori$dis_3SS[as.character(strand(m6A_hek_glori)) == "+"] <-
+    m6A_hek_glori$dis_1[as.character(strand(m6A_hek_glori)) == "+"]
+m6A_hek_glori$dis_3SS[as.character(strand(m6A_hek_glori)) == "-"] <- 
+    m6A_hek_glori$dis_2[as.character(strand(m6A_hek_glori)) == "-"]
+
+m6A_hek_glori$dis_5SS <- 0
+m6A_hek_glori$dis_5SS[as.character(strand(m6A_hek_glori)) == "+"] <-
+    m6A_hek_glori$dis_2[as.character(strand(m6A_hek_glori)) == "+"]
+m6A_hek_glori$dis_5SS[as.character(strand(m6A_hek_glori)) == "-"] <- 
+    m6A_hek_glori$dis_1[as.character(strand(m6A_hek_glori)) == "-"]
+
+## for distance to the SS of sites on the first and last exon we need to correct the 
+m6A_hek_glori_n <- m6A_hek_glori[strand(m6A_hek_glori) == "-"]
+m6A_hek_glori_p <- m6A_hek_glori[strand(m6A_hek_glori) == "+"]
+
+#### negative strand
+m6A_hek_glori_n$dis_SS[m6A_hek_glori_n$exon_number == "1"] <-
+    m6A_hek_glori_n$dis_1[m6A_hek_glori_n$exon_number == "1"]
+m6A_hek_glori_n$dis_SS[m6A_hek_glori_n$exon_number == m6A_hek_glori_n$exon_max] <- 
+    m6A_hek_glori_n$dis_2[m6A_hek_glori_n$exon_number == m6A_hek_glori_n$exon_max]
+
+##### relative position within exon
+m6A_hek_glori_n$exon_relative_position <- 
+    m6A_hek_glori_n$dis_2/(m6A_hek_glori_n$exon_end - m6A_hek_glori_n$exon_start)
+
+#### positive strand
+m6A_hek_glori_p$dis_SS[m6A_hek_glori_p$exon_number == "1"] <- 
+    m6A_hek_glori_p$dis_2[m6A_hek_glori_p$exon_number == "1"]
+m6A_hek_glori_p$dis_SS[m6A_hek_glori_p$exon_number == m6A_hek_glori_p$exon_max] <- 
+    m6A_hek_glori_p$dis_1[m6A_hek_glori_p$exon_number == m6A_hek_glori_p$exon_max]
+
+##### relative position within exon
+m6A_hek_glori_p$exon_relative_position <- 
+    m6A_hek_glori_p$dis_1/(m6A_hek_glori_p$exon_end - m6A_hek_glori_p$exon_start)
+
+## merge
+m6A_hek_glori <- c(m6A_hek_glori_p, m6A_hek_glori_n)
+
+## assign the max SS distance to the sites which located on the transcript without intron
+max_dis_SS <- max(m6A_hek_glori_p$dis_SS, m6A_hek_glori_n$dis_SS)
+
+m6A_hek_glori$dis_3SS[m6A_hek_glori$exon_number == "1"] <- max_dis_SS
+m6A_hek_glori$dis_5SS[m6A_hek_glori$exon_number == m6A_hek_glori$exon_max] <- max_dis_SS
+
+m6A_hek_glori$dis_SS[m6A_hek_glori$exon_max == "1"] <- max_dis_SS
+m6A_hek_glori$dis_3SS[m6A_hek_glori$exon_max == "1"] <- max_dis_SS
+m6A_hek_glori$dis_5SS[m6A_hek_glori$exon_max == "1"] <- max_dis_SS
+
+m6A_hek_glori$dis_ss_log <- log2(m6A_hek_glori$dis_SS+1)
+m6A_hek_glori$bin_ss <- cut(m6A_hek_glori$dis_SS, 
+                           breaks = c(-0.1, seq(50,500,50), Inf),
+                       labels = c("0-50", "51-100","101-150", "151-200",
+                                  "201-250", "251-300", "301-350","351-400",
+                                  "401-450", "451-500", "500+"))
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(as.data.frame(m6A_hek_glori[!is.na(m6A_hek_glori$bin_ss)]), 
+       aes(x = bin_ss, y = log2FC_stm_6h)) +
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1,1)) + 
+    facet_wrap(~location) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = "Distance to SS", y = "LFC upon STM2457 6h")
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(as.data.frame(m6A_hek_glori[!is.na(m6A_hek_glori$bin_ss)]), 
+       aes(x = bin_ss, y = m6A_lvl_avg)) +
+    geom_boxplot(outlier.shape = NA) + 
+    facet_wrap(~location) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = "Distance to SS", y = "m6A stoichiometry")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,1081 @@
+---
+title: "03 iCLIP analysis"
+author: "You Zhou"
+date: "`r format(Sys.time(), '%B %e, %Y')`"
+output:
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: no
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    toc_collapsed: yes
+    fig_width: 8 
+    fig_height: 4 
+  bookdown::pdf_document2:
+    keep_tex: yes
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+graphics: yes
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+geometry: margin=1in
+fontsize: 18pt
+---
+
+```{r knitr off, echo=FALSE, message=FALSE,cache=FALSE, results="hide", render=FALSE ,warning=FALSE}
+knitr::opts_chunk$set(echo=F, error=FALSE, warning=FALSE,message=FALSE, crop=NULL)
+```
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(xlsx)
+library(keras)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(tidyverse)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(adabag)
+library(rtracklayer)
+library(Rsamtools)
+library(ranger)
+library(webr)
+library(cliProfiler)
+library(ggpointdensity)
+library(tensorflow)
+library(keras)
+library(Rtsne)
+library(patchwork)
+library(ggthemr)
+library(ggpubr)
+library(ggrastr)
+library(forcats)
+library(ComplexHeatmap)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#E41A1C"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold"),
+      axis.title.x=element_text(size = font_szie, face="bold"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90),
+      plot.title = element_text(size = font_szie, face="bold"),
+      legend.text = element_text(size = font_szie, face="bold"),
+      legend.title = element_text(size = font_szie, face="bold"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"))
+)
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = 1))
+update_geom_defaults("hline",   list(color = "#993404", size = 1))
+update_geom_defaults("abline",   list(color = "#993404", size = 1))
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+
+## Used threshold
+p_thresh <- 0.1
+DRACN <- "[GAT][GA]AC[TACG]"
+```
+
+# Introduction
+This script collects the code for the YTHDF2 iCLIP related analysis.
+
+---
+
+# The crosslinking signal of YTHDF2 iCLIP reduced upon STM treatment
+
+```{r}
+## set the path to the data
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+## Data loading
+# m6A_hek_miCLIP <- readRDS(paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+m6A_hek_GLORI <- readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+
+## Get 5mers on m6A sites
+m6A_hek_GLORI$kmer5 <- getSeq(Hsapiens, m6A_hek_GLORI+2) %>% suppressWarnings(.)
+## crosslinking signal loading
+path_bw <- "/Users/codezy/Desktop/Data/mkrn1 and ytfdf2 iCLIP/YTHDF2/bw/"
+files_p <- list.files(path_bw, "plus")
+files_n <- list.files(path_bw, "minus")
+
+## positive strand
+bw_list_p <- lapply(files_p, function(x){
+    readBWtoRLE(paste0(path_bw, x))
+})
+## rename the object
+names(bw_list_p) <- gsub("imb_koenig_2021_12_YTHDF2_", "", files_p) %>% 
+    gsub(".v3.duprm.plus.bw", "", .)
+
+## negative strand
+bw_list_n <- lapply(files_n, function(x){
+    readBWtoRLE(paste0(path_bw, x))
+})
+names(bw_list_n) <- gsub("imb_koenig_2021_12_YTHDF2_", "", files_n) %>% 
+    gsub(".v3.duprm.minus.bw", "", .)
+
+## YTHDF2 peaks
+extracol <- c(namesum = "character")
+wt_ythdf2_merge <- import.bed(
+  "~/Desktop/Data/mkrn1 and ytfdf2 iCLIP/YTHDF2/merge_pureCLIP/sites.merged_ythdf2.bam.bed", 
+                                 extraCols = extracol) %>%
+  .[seqnames(.) %in% standardChromosomes(.)] ## keep the peaks on main chromosome
+## make the ID for each peaks for downstream usage
+wt_ythdf2_merge$ID <- paste0(seqnames(wt_ythdf2_merge),  
+                                ":", start(wt_ythdf2_merge), "_", 
+                                strand(wt_ythdf2_merge))
+stm_ythdf2_merge <- import.bed(
+  "~/Desktop/Data/mkrn1 and ytfdf2 iCLIP/YTHDF2/merge_pureCLIP/sites.merged_stm_ythdf2.bam.bed", 
+                                 extraCols = extracol) %>%
+  .[seqnames(.) %in% standardChromosomes(.)]
+stm_ythdf2_merge$ID <- paste0(seqnames(stm_ythdf2_merge),  
+                                ":", start(stm_ythdf2_merge), "_", 
+                                strand(stm_ythdf2_merge))
+## remove the no use column
+wt_ythdf2_merge$namesum <- wt_ythdf2_merge$name <- NULL
+stm_ythdf2_merge$namesum <- stm_ythdf2_merge$name <- NULL
+## get 5mers on the peak
+wt_ythdf2_merge$kmer5 <- getSeq(Hsapiens, wt_ythdf2_merge+2) %>% suppressWarnings(.)
+stm_ythdf2_merge$kmer5 <- getSeq(Hsapiens, stm_ythdf2_merge+2) %>% suppressWarnings(.)
+## get the nucleotide on the peak
+wt_ythdf2_merge$seq <- getSeq(Hsapiens, wt_ythdf2_merge) %>% suppressWarnings(.)
+stm_ythdf2_merge$seq <- getSeq(Hsapiens, stm_ythdf2_merge) %>% suppressWarnings(.)
+
+wt_ythdf2_merge$group <- "WT"
+stm_ythdf2_merge$group <- "STM"
+
+## remove peaks on N
+wt_ythdf2_merge <- wt_ythdf2_merge[wt_ythdf2_merge$seq != "N"]
+stm_ythdf2_merge <- stm_ythdf2_merge[stm_ythdf2_merge$seq != "N"]
+
+## merge the peaks from WT and STM
+all_peaks <- c(wt_ythdf2_merge, stm_ythdf2_merge)
+```
+
+\FloatBarrier
+
+## Differential crosslinking analysis for YTHDF2 peaks
+To correct the bias from transcript abundant changes, here we used the log2FC upon STM for RNAseq 
+to run the **bin-based differential crosslinking analysis** (more detail about bin-based method 
+can be found in the paper [Körtel et al., 2021](https://doi.org/10.1093/nar/gkab485)). 
+
+```{r}
+## read the STM 9h result
+da_stm_9h <- read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv"))
+
+all_peaks$group <- NULL
+all_peaks <- unique(all_peaks)
+
+## split the peaks based on the strand
+all_peaks_p <- all_peaks[strand(all_peaks) == "+"]
+all_peaks_n <- all_peaks[strand(all_peaks) == "-"]
+
+## assign crosslinking signals to peaks
+## WT
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$DMSO_1, "ythdf2_1")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$DMSO_2, "ythdf2_2")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$DMSO_3, "ythdf2_3")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$DMSO_4, "ythdf2_4")
+
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$DMSO_1, "ythdf2_1")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$DMSO_2, "ythdf2_2")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$DMSO_3, "ythdf2_3")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$DMSO_4, "ythdf2_4")
+
+## stm
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$STM2457_1, "ythdf2_stm_1")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$STM2457_2, "ythdf2_stm_2")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$STM2457_3, "ythdf2_stm_3")
+all_peaks_p <- reads.assignment(all_peaks_p, bw_list_p$STM2457_4, "ythdf2_stm_4")
+
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$STM2457_1, "ythdf2_stm_1")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$STM2457_2, "ythdf2_stm_2")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$STM2457_3, "ythdf2_stm_3")
+all_peaks_n <- reads.assignment(all_peaks_n, bw_list_n$STM2457_4, "ythdf2_stm_4")
+
+## merge peaks after assign the crosslinking signal
+all_peaks <- c(all_peaks_p, all_peaks_n)
+
+## Use function metaGeneProfile to assign peaks to genes
+all_peaks <- metaGeneProfile(all_peaks,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+all_peaks$log2FC_stm_9h <- da_stm_9h$log2FC[match(all_peaks$Gene_ID, da_stm_9h$gene_id)]
+
+## filtering for the peaks with log2FC upon stm, since DCA requires on the log2FC 
+all_peaks <- all_peaks[!is.na(all_peaks$log2FC_stm_9h)]
+```
+
+```{r}
+## calculate the log2FC based on iCLIP reads ##
+## load read counts ##
+df_count <- read.table("~/Desktop/Data/mkrn1 and ytfdf2 iCLIP/YTHDF2/count_DF2_iCLIP.txt", 
+                       header = T)[,c(1,7:14)]
+colnames(df_count) <- gsub("imb_koenig_2021_12_YTHDF2_", "", colnames(df_count))
+colnames(df_count) <- gsub(".v3.duprm.bam", "", colnames(df_count))
+rownames(df_count) <- df_count$Geneid
+df_count$Geneid <- NULL
+
+## DESeq2 analysis
+condition <- data.frame(condition = c(rep(c("WT", "STM"), each = 4)))
+
+dds.count <- DESeqDataSetFromMatrix(countData = df_count,  colData = condition,
+                                    design = ~ condition)
+dds.count <- dds.count[rowSums(counts(dds.count)) >= 1]
+dds.count <- DESeq2::DESeq(dds.count)
+## get the result for expressed gene
+res.count <- results(dds.count, contrast=c("condition", "STM", "WT")) %>% as.data.frame(.) %>%
+    filter(baseMean >= 10) %>% mutate(gene_id = rownames(.))
+## assign LFC iCLIP to peaks for the bin-based method
+all_peaks$log2FC_stm_iCLIP <- res.count$log2FoldChange[
+    match(all_peaks$Gene_ID, res.count$gene_id)
+]
+```
+
+```{r eval=FALSE, include=FALSE}
+## Differential crosslinking analysis
+all_peaks_f <- all_peaks[!is.na(all_peaks$log2FC_stm_iCLIP)]
+# bin based method
+res.bin <- data.frame(baseMean = 0, log2FoldChange = 0, lfcSE = 0,
+                               stat = 0, pvalue= 0, padj = 0, ID = "x")
+i = min(all_peaks_f$log2FC_stm_iCLIP)
+
+while(i <= max(all_peaks_f$log2FC_stm_iCLIP)+0.3){
+  tryCatch({
+  k <- all_peaks_f[all_peaks_f$log2FC_stm_iCLIP >= i &
+                            all_peaks_f$log2FC_stm_iCLIP <i+0.3]
+  ## select the column for the truncation reads number
+  df <- mcols(k)[5:12]
+  rownames(df) <- k$ID
+  
+  coldata3 <- data.frame(condition = as.factor(c(rep("WT", 4), rep("STM", 4))))
+  
+  dds.x <- DESeqDataSetFromMatrix(countData = df,
+                                      colData = coldata3,
+                                      design = ~condition)
+  keep <- rowSums(counts(dds.x)) >= 7
+  dds.x <- dds.x[keep,]
+  dds.x <- DESeq(dds.x)
+  res.x <- results(dds.x, contrast=c("condition","STM","WT"))
+  res.x$ID <- rownames(res.x)
+  res.bin <- rbind(res.bin, as.data.frame(res.x))
+  
+  },
+    warning = function(msg){
+      message(paste0(msg))
+      return(NA)
+    },
+    error = function(msg){
+      message(paste0(msg,"\n"))
+      return(NULL)
+    })
+
+    i = i+0.3
+}
+res.bin <- res.bin[-1,]
+saveRDS(res.bin, paste0(path.to.data, "da_YTHDF2_iclip_iCLIPlog2FC_filtered.rds"))
+```
+
+```{r fig.height=3, fig.width=6}
+res.bin.iCLIP <- readRDS(paste0(path.to.data, "da_YTHDF2_iclip_iCLIPlog2FC_filtered.rds"))
+
+df <- res.bin.iCLIP[which(res.bin.iCLIP$padj < p_thresh),]
+res.bin.iCLIP$sig <- case_when(res.bin.iCLIP$padj < p_thresh ~ "Sig",
+                               T ~ "Not")
+
+ggplot(res.bin.iCLIP, aes(x = log2(baseMean+1), y = log2FoldChange, color = sig)) + 
+  ggrastr::rasterise(geom_point(), dpi = 600) + 
+  geom_hline(yintercept = 0, linetype = 2) + 
+  labs(x = "BaseMean + 1 (log2)", y = "Fold Change of YTHDF2 binding (log2)") + 
+  ggtitle(paste0("DA result for significant peaks down: ", nrow(df[df$log2FoldChange<0,]),
+                 " up: ", nrow(df[df$log2FoldChange>0,]), " total: ", nrow(res.bin.iCLIP))) + 
+    scale_color_manual(values = c("lightgrey", "red")) + 
+  ggrastr::rasterise(geom_point(data = df, aes(x = log2(baseMean+1), y = log2FoldChange), 
+                                color = "red"), dpi = 600)
+```
+
+```{r fig.height=3, fig.width=6}
+## find out the significantly regulated peaks in DESeq output
+sig.up <- res.bin.iCLIP[which(res.bin.iCLIP$log2FoldChange>0 & res.bin.iCLIP$padj < p_thresh),]
+sig.down <- res.bin.iCLIP[which(res.bin.iCLIP$log2FoldChange<0 & res.bin.iCLIP$padj < p_thresh),]
+no.change <- res.bin.iCLIP[which(res.bin.iCLIP$padj > 0.5),]
+
+## assign the regulation back to peaks
+sig.up <- all_peaks[all_peaks$ID %in% sig.up$ID]
+sig.down <- all_peaks[all_peaks$ID %in% sig.down$ID]
+no.change <- all_peaks[all_peaks$ID %in% no.change$ID]
+
+## make seqlog for up and down regulated peaks
+p1 <- ggseqlogo(as.character(getSeq(Hsapiens, sig.up+5)), method = "p") + 
+    ggtitle("Significant up regulated peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p2 <- ggseqlogo(as.character(getSeq(Hsapiens, sig.down+5)), method = "p") + 
+    ggtitle("Significant down regulated peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p1+p2
+```
+
+```{r fig.height=3, fig.width=6}
+## seqlogo in bits
+p1 <- ggseqlogo(as.character(getSeq(Hsapiens, sig.up+5))) + 
+    ggtitle("Significant up regulated peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p2 <- ggseqlogo(as.character(getSeq(Hsapiens, sig.down+5))) + 
+    ggtitle("Significant down regulated peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p1+p2
+```
+
+```{r fig.height=3, fig.width=6}
+## seqlogo for no change peaks
+p1 <- ggseqlogo(as.character(getSeq(Hsapiens, no.change+5))) + 
+    ggtitle("No change peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p2 <- ggseqlogo(as.character(getSeq(Hsapiens, no.change+5)), method = "p") + 
+    ggtitle("No change peaks") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+p1+p2
+```
+
+```{r fig.height=4, fig.width=4}
+## find out if the peaks is m6A or is DRACN
+all_peaks$is.m6A <- ifelse(all_peaks %over% m6A_hek_GLORI, T, F)
+all_peaks$is.DRACN <- grepl(DRACN, all_peaks$kmer5)
+
+res.bin.iCLIP$is.DRACN <- all_peaks$is.DRACN[match(res.bin.iCLIP$ID, all_peaks$ID)]
+res.bin.iCLIP$is.m6A <- all_peaks$is.m6A[match(res.bin.iCLIP$ID, all_peaks$ID)]
+
+res.bin.iCLIP$group <- 
+    case_when(res.bin.iCLIP$is.DRACN == T ~ "DRACN",
+              T ~ "Other")
+
+all_peaks$log2FC_iCLIP_stm <- res.bin.iCLIP$log2FoldChange[
+    match(all_peaks$ID, res.bin.iCLIP$ID)
+]
+## keep the peaks with DCA result
+all_peaks <- all_peaks[!is.na(all_peaks$log2FC_iCLIP_stm)]
+```
+
+## YTHDF2 iCLIP peaks on non-DRACN nucleotides
+
+```{r fig.height=5, fig.width=5}
+## identify the peaks which do not located on DRACH sites
+all_peaks_non_DRACN <- all_peaks[!grepl(DRACN, all_peaks$kmer5)]
+
+## pie chart
+make_pie_chart(all_peaks_non_DRACN$seq, "YTHDF2 peaks on non-DRACN motif")
+```
+
+```{r}
+## be prepare for meta gene profile
+all_peaks$Position[all_peaks$location == "CDS"] <- 
+    all_peaks$Position[all_peaks$location == "CDS"] + 1
+all_peaks$Position[all_peaks$location == "UTR3"] <- 
+    all_peaks$Position[all_peaks$location == "UTR3"] + 2
+```
+
+\FloatBarrier
+
+# DRACN distribution around YTHDF2 peaks {.tabset}
+
+## A peaks
+
+```{r}
+## find out the position of DRACN motif around DF2 peaks on different nucleotides
+df <- motifProfile(all_peaks[all_peaks$seq == "A"], 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around YTHDF2 A peaks")
+```
+
+## T peaks
+
+```{r}
+df <- motifProfile(all_peaks[all_peaks$seq == "T"], 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around YTHDF2 T peaks")
+```
+
+## G peaks
+
+```{r}
+df <- motifProfile(all_peaks[all_peaks$seq == "G"], 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around YTHDF2 G peaks")
+```
+
+## C peaks
+
+```{r}
+df <- motifProfile(all_peaks[all_peaks$seq == "C"], 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around YTHDF2 C peaks")
+```
+
+## All peaks
+
+```{r}
+df <- motifProfile(all_peaks, 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around all YTHDF2 peaks")
+```
+
+## Down-regulated sites
+
+```{r}
+## DRACN distribution around down regulated sites
+df <- motifProfile(sig.down, 
+                   motif = "DRACN",genome = "BSgenome.Hsapiens.UCSC.hg38")[[1]] %>% 
+    suppressWarnings(.)
+df$Position <- as.character(df$Position) %>% as.numeric(.)
+df$Position <- df$Position + 2
+df$Position <- factor(df$Position, levels = c(-8:12))
+
+ggplot(df, aes(x = Position, y = Fraction)) + 
+    geom_col() + 
+    labs(title = "DRACN motif distribution around down-regulated peaks")
+```
+
+
+# {-}
+
+## DRACN and -1nt DRACN
+
+```{r fig.height=5, fig.width=5}
+## extract the 7mer around peaks to identify the DRACN sites which cross link at R in DRACN
+all_peaks$kmer7 <- getSeq(Hsapiens, all_peaks+3) %>% suppressWarnings()
+
+res.bin.iCLIP$kmer7 <- all_peaks$kmer7[match(res.bin.iCLIP$ID, all_peaks$ID)] %>% as.character()
+res.bin.iCLIP$label <- "Others"
+res.bin.iCLIP$label[res.bin.iCLIP$is.DRACN == T] <- "DRACN"
+
+## extract DRACN which crosslink at R
+res.bin.iCLIP$label[grep("[TACG][TACG][GAT][GA]AC[TACG]", res.bin.iCLIP$kmer7)] <- "-1nt DRACN"
+
+ggplot(res.bin.iCLIP, aes(x = log2FoldChange, color = label)) + 
+    stat_ecdf(size = 1.5) + 
+    labs(y = "Accumulated fraction", 
+         x = "YTHDF2 iCLIP signal fold change upon STM (log2)",
+         title = "The ECDF of iCLIP log2FC upon STM",
+         fill = "Groups") + 
+    coord_cartesian(xlim = c(-4.5,4.5)) + 
+    scale_color_manual(values = c("yellow2","orange", "grey"))
+```
+
+
+```{r fig.height=5, fig.width=5}
+## pie chart
+make_pie_chart(res.bin.iCLIP$label, "YTHDF2 peaks on")
+```
+
+```{r fig.height=5, fig.width=5}
+## merge the -1nt DRACN to normal DRACN
+## extract the 7mer around peaks to identify the DRACN sites which cross link at R in DRACN
+all_peaks$kmer7 <- getSeq(Hsapiens, all_peaks+3) %>% suppressWarnings()
+
+res.bin.iCLIP$kmer7 <- all_peaks$kmer7[match(res.bin.iCLIP$ID, all_peaks$ID)] %>% as.character()
+res.bin.iCLIP$label <- "Others"
+res.bin.iCLIP$label[res.bin.iCLIP$is.DRACN == T] <- "DRACN"
+
+## extract DRACN which crosslink at R
+res.bin.iCLIP$label[grep("[TACG][TACG][GAT][GA]AC[TACG]", res.bin.iCLIP$kmer7)] <- "DRACN"
+
+ggplot(res.bin.iCLIP, aes(x = log2FoldChange, color = label)) + 
+    ggrastr::rasterise(stat_ecdf(size = 1.5), dpi = 600) + 
+    labs(y = "Accumulated fraction", 
+         x = "YTHDF2 iCLIP signal fold change upon STM (log2)",
+         title = "The ECDF of iCLIP log2FC upon STM (DRACN merge)",
+         fill = "Groups") + 
+    coord_cartesian(xlim = c(-4.5,4.5)) + 
+    scale_color_manual(values = c("orange", "grey"))
+ggsave(device = "pdf","pics/YTHDF2 DRACN ecdf.pdf")
+```
+
+```{r fig.height=5, fig.width=5}
+## pie chart
+## merge the -1nt DRACN to normal DRACN
+make_pie_chart(res.bin.iCLIP$label, "YTHDF2 peaks on (DRACN merge)")
+ggsave(device = "pdf","pics/YTHDF2 DRACN pie.pdf")
+```
+
+
+Since the peaks on `NNDRACN` also strongly reduce their iCLIP2 signal upon, we take the peaks on 
+`DRACN` and the peaks on `NNDRACN` as YTHDF2 m6A-dependent binding sites. To make the downstream 
+analysis easier, I move the NNDRACN peaks 1nt to down stream to make it located on DRACN.
+
+```{r}
+## move NNDRACN by 1nt for downstream analysis
+## split peaks and extract NNDRACN peaks
+all_peaks_NNDRACN <- all_peaks[grep("[TACG][TACG][GAT][GA]AC[TACG]", all_peaks$kmer7)]
+all_peaks_other <- subsetByOverlaps(all_peaks, all_peaks_NNDRACN, invert = T)
+
+## move the NNDRACN peaks by 1nt so it can located at DRACN
+all_peaks_NNDRACN <- plyranges::shift_downstream(all_peaks_NNDRACN, 1)
+all_peaks <- c(all_peaks_NNDRACN, all_peaks_other)
+
+## re assign the 5mers after peak moving
+all_peaks$kmer5 <- getSeq(Hsapiens, all_peaks+2) %>% suppressWarnings(.)
+## reassign the peaks after peak moving
+all_peaks <- metaGeneProfile(all_peaks,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+```
+
+```{r}
+all_peaks$is.DRACN <- grepl(DRACN, all_peaks$kmer5)
+## initial df
+tmp <- all_peaks[all_peaks$score >= 0]
+df_out <- as.data.frame(table(tmp$is.DRACN)) %>% 
+        mutate(PureCLIP_score = 0)
+## loop with different pureCLIP threshold
+for(i in seq(5,30,5)){
+    tmp <- all_peaks[all_peaks$score >= i]
+    df <- as.data.frame(table(tmp$is.DRACN)) %>% 
+        mutate(PureCLIP_score = i)
+    df_out <- rbind(df_out, df)
+}
+
+df_out <- df_out %>% group_by(PureCLIP_score) %>% mutate(sum = sum(Freq),
+                                                         fration = Freq/sum)
+df_out <- df_out[df_out$Var1 == T,]
+
+ggplot(df_out, aes(x = PureCLIP_score, y = fration)) + 
+    geom_line() +
+    geom_point() + 
+    labs(y = "Fraction of DRACN",
+         x = "Filtering threshold for pureCLIP score")
+```
+
+# YTHDF2 binding preference
+
+```{r fig.height=3, fig.width=6}
+## YTHDF2 peaks on DRACN 
+all_DRACN <- all_peaks[grep(DRACN, all_peaks$kmer5)]
+## save the object for the usage in other scripts
+# saveRDS(all_DRACN, paste0(path.to.data, "ythdf2_binding.rds"))
+# all_DRACN$name <- "YTHDF2"
+# export.bed(all_DRACN, "YTHDF2_binding_sites_DRACN.bed")
+## calculate the 5mer frequency
+df <- as.data.frame(all_DRACN) %>% group_by(kmer5) %>% summarise(number = n())
+
+ggplot(df, aes(x = reorder(kmer5, -number), y = number, label = number)) + 
+    geom_col() + 
+    geom_text(vjust = -0.1) + 
+    labs(title = "YTHDF2 peaks' 5mer frequency on DRACN",
+         x = NULL) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+```{r}
+##  calculate the median lfc and median pureCLIP score for each 5mer
+df <- as.data.frame(all_peaks) %>%
+    group_by(kmer5) %>% summarise(median_score = median(score),
+                                  number = n(),
+                                  median_log2FC = median(log2FC_iCLIP_stm))
+df <- df[order(df$median_score, decreasing = T),]
+df$DRACN <- ifelse(grepl(DRACN, df$kmer5), "DRACN", "Other")
+df$label <- ifelse(grepl(DRACN, df$kmer5), df$kmer5, NA)
+
+df <- df[order(df$DRACN, decreasing = T),]
+
+ggplot(df,aes(x = log2(number), y = median_score, color = DRACN, label = label)) + 
+    geom_point() + 
+    ggrepel::geom_label_repel(hjust=0,
+    size=3, segment.size=0.25, nudge_x=0.5, direction="y", show.legend = F) + 
+    labs(y = "Cross linking score (median of PureCLIP score)",
+         x = "Peak frequency [log2]")
+```
+
+```{r fig.height=5, fig.width=5}
+## pie chart
+make_pie_chart(all_DRACN$location, "YTHDF2 peaks on")
+```
+
+
+```{r fig.height=5, fig.width=5}
+## extract the non-DRACN peaks
+all_peaks_non_DRACN <- all_peaks[!grepl(DRACN, all_peaks$kmer5)]
+## pie chart
+make_pie_chart(all_peaks_non_DRACN$location, "YTHDF2 peaks on non-DRACN motif")
+ggsave(device = "pdf", "pics/pie for DF2 non-DRACN peaks.pdf")
+```
+
+
+```{r fig.height=3, fig.width=6}
+## m6A peaks on DRACN 
+m6A_hek_DRACN <- m6A_hek_GLORI[grep(DRACN, m6A_hek_GLORI$kmer5)]
+## calculate the 5mer frequency of m6A sites
+df <- as.data.frame(m6A_hek_DRACN) %>% group_by(kmer5) %>%
+    summarise(number = n())
+
+ggplot(df, 
+       aes(x = reorder(kmer5, -number), y = number, label = number)) + 
+    geom_col() + 
+    geom_text(vjust = -0.2) + 
+    labs(title = "m6A 5mer frequency on DRACN",
+         x = NULL) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+```{r fig.height=5, fig.width=5}
+make_pie_chart(m6A_hek_GLORI$location[m6A_hek_GLORI$location != "NO"], "m6A peaks on")
+```
+
+```{r fig.height=5, fig.width=5}
+## find out the DF2 peaks which did not overlap to m6A
+m6A_independent_peak <- subsetByOverlaps(c(wt_ythdf2_merge, stm_ythdf2_merge), all_peaks, invert = T)
+m6A_independent_peak <- m6A_independent_peak[m6A_independent_peak$ID %in% res.bin.iCLIP$ID]
+
+make_pie_chart(m6A_hek_GLORI$location[m6A_hek_GLORI$location != "NO"], "m6A peaks on")
+```
+
+## The seqlogo for significantly downregulated genes after moving 1nt for the -1 DRACN
+
+```{r}
+## assign the regulation back to peaks
+sig.down <- all_peaks[all_peaks$ID %in% sig.down$ID]
+
+ggseqlogo(as.character(getSeq(Hsapiens, sig.down+5) %>% RNAStringSet(.))) + 
+    ggtitle("Significant down regulated peaks (-1 DRACN moved)") + 
+    scale_x_continuous(breaks = c(1:11), labels = c(-5:5))
+```
+
+\FloatBarrier
+
+# YTHDF2 tend to binds the m6A with higher stoichiometry and be in cluster
+Since miCLIP can not measure the stoichiometry, the analysis in this section will only use the 
+m6A sites from GLORI. The cluster information that we used is also from GLORI data.
+
+```{r fig.height=3, fig.width=3}
+## find out the m6A sites which bound by DF2
+m6A_hek_GLORI$is.YTHDF2 <- m6A_hek_GLORI %over% all_DRACN
+
+m6A_hek_GLORI$bin_stoi <- cut(m6A_hek_GLORI$m6A_lvl_avg, breaks = c(seq(0,1,0.2)),
+                                labels = c(as.character(seq(0.2,1,0.2))))
+
+ggplot(as.data.frame(m6A_hek_GLORI), aes(fill = is.YTHDF2, x = bin_stoi)) + 
+    geom_bar(position = "fill") + 
+    labs(x = "stoiometry", y = "Fraction", fill = "Bound by YTHDF2")
+```
+
+```{r fig.height=3, fig.width=6}
+ggplot(as.data.frame(m6A_hek_GLORI), aes(fill = is.YTHDF2, x = bin_stoi)) + 
+    geom_bar(position = "fill") + 
+    labs(x = "Stochiometry", y = "Fraction", fill = "Bound by YTHDF2") + 
+    facet_wrap(~Cluster_info)
+```
+
+```{r fig.height=3, fig.width=6}
+## count frequency based on DF2 binding cluster and bin of sum of stoichiometry
+df <- as.data.frame(m6A_hek_GLORI) %>% 
+    group_by(is.YTHDF2, bin_stoi, Cluster_info) %>%
+    summarise(number = n(), .groups = "drop") %>% group_by(bin_stoi, Cluster_info) %>%
+    mutate(sum = sum(number)) %>% ungroup() %>% mutate(fraction = number/sum)
+
+ggplot(df[df$is.YTHDF2 == T,], aes(x = bin_stoi, y = fraction, fill = Cluster_info)) + 
+    geom_col(position = position_dodge()) +
+    labs(y = "Bound by YTHDF2 (fraction)")
+```
+
+```{r}
+m6A_hek_GLORI$Position[m6A_hek_GLORI$location == "CDS"] <- 
+    m6A_hek_GLORI$Position[m6A_hek_GLORI$location == "CDS"] + 1
+m6A_hek_GLORI$Position[m6A_hek_GLORI$location == "UTR3"] <- 
+    m6A_hek_GLORI$Position[m6A_hek_GLORI$location == "UTR3"] + 2
+```
+
+```{r}
+## metagene profile for m6A sites in cluster or non in cluster
+ggplot(as.data.frame(m6A_hek_GLORI[m6A_hek_GLORI$location != "NO"]), 
+       aes(x = Position, color = Cluster_info)) + 
+    geom_density() + 
+    scale_x_continuous(breaks = c(0.5,1.5,2.5),
+                       labels = c("5'UTR", "CDS", "3'UTR")) + 
+    geom_vline(xintercept = c(1,2), linetype = 2)
+```
+
+```{r fig.height=3, fig.width=6}
+## DF2 binding fraction separate by genomic location
+df <- as.data.frame(m6A_hek_GLORI) %>% group_by(is.YTHDF2, bin_stoi, location, Cluster_info) %>%
+    summarise(number = n(), .groups = "drop") %>% group_by(bin_stoi, location, Cluster_info) %>%
+    mutate(sum = sum(number), fraction = number/sum)
+
+ggplot(df[df$is.YTHDF2 == T,], aes(x = bin_stoi, y = fraction, fill = Cluster_info)) + 
+    geom_col(position = position_dodge()) + 
+    facet_wrap(~location)  +
+    labs(y = "Bound by YTHDF2 (fraction)")
+```
+
+\FloatBarrier
+
+# Boxplot for YTHDF2 and YTHDF2+STM
+
+```{r}
+basemean <- 10
+## calculate m6A number on different genes' genomic region
+number_m6A_glori <- as.data.frame(m6A_hek_GLORI) %>% 
+    group_by(location, Gene_ID) %>%
+    summarise(number = n(), .groups = "drop")
+number_m6A_glori$bin_m6A <- cut(number_m6A_glori$number, breaks = c(0,3,6,9,12,Inf))
+
+## load DA result
+da_stm_6h <- 
+  read_Anke_DA(paste0(path.to.data, "sR18_STM.vs.sR18_DMSO.csv")) %>% 
+  filter(baseMean >= basemean)
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv")) %>% 
+  filter(baseMean >= basemean)
+da_stm_24h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_24h_STM2457.vs.HEK293T_24h_DMSO.csv")) %>% 
+  filter(baseMean >= basemean)
+da_ythdf2 <- 
+    read_Anke_DA(paste0(path.to.data, "YTHDF2_KD_DMSO.vs.sR18_DMSO.csv")) %>% 
+  filter(baseMean >= basemean)
+
+## assign LFC to genes
+number_m6A_glori$log2FC_ythdf2 <- da_ythdf2$log2FC[
+    match(number_m6A_glori$Gene_ID, da_ythdf2$gene_id)
+]
+number_m6A_glori$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(number_m6A_glori$Gene_ID, da_stm_9h$gene_id)
+]
+number_m6A_glori$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(number_m6A_glori$Gene_ID, da_stm_6h$gene_id)
+]
+number_m6A_glori$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(number_m6A_glori$Gene_ID, da_stm_24h$gene_id)
+]
+```
+
+```{r}
+number_m6A_glori$location <- factor(number_m6A_glori$location,
+                                    levels = c("UTR5", "CDS", "UTR3", "NO"))
+ggplot(number_m6A_glori[number_m6A_glori$location!= "NO",], 
+    aes(fill = bin_m6A, y = log2FC_ythdf2, x = location)) + 
+         geom_boxplot(outlier.shape = NA)+ 
+         coord_cartesian(ylim = c(-1.5, 1.5)) + 
+         labs(title = "The m6A number and YTHDF2 KD") + 
+         geom_hline(yintercept = 0, linetype = 2) +
+         scale_fill_brewer(palette="GnBu")
+```
+
+```{r}
+## The DA result by comparing DF2+STM vs DF2
+da_YTHDF2vsYTHDF2_STM <- 
+    readRDS("~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/da_YTHDF2vsYTHDF2_STM.rds") %>% 
+    as.data.frame(.) %>%
+    filter(baseMean >= basemean)
+
+number_m6A_glori$log2FC_ythdf2_ythdf2stm <- da_YTHDF2vsYTHDF2_STM$log2FoldChange[
+    match(number_m6A_glori$Gene_ID, rownames(da_YTHDF2vsYTHDF2_STM))
+]
+
+ggplot(number_m6A_glori[number_m6A_glori$location!= "NO",], 
+    aes(fill = bin_m6A, y = log2FC_ythdf2_ythdf2stm, x = location)) + 
+         geom_boxplot(outlier.shape = NA)+ 
+         coord_cartesian(ylim = c(-1.5, 1.5)) + 
+         labs(title = "The m6A number and YTHDF2 KD",
+              y = "LFC YTHDF2 KD vs YTHDF2+STM") + 
+         geom_hline(yintercept = 0, linetype = 2) +
+         scale_fill_brewer(palette="GnBu")
+```
+
+```{r}
+## DA result for DF2+STM vs STM
+da_STMvsYTHDF2_STM <- 
+    readRDS("~/Desktop/Project/miCLIPs/m6A degradation/10 YTHDF2 RNAseq/rds/da_STMvsYTHDF2_STM.rds") %>% 
+    as.data.frame(.) %>%
+    filter(baseMean >= basemean)
+
+number_m6A_glori$log2FC_stm_ythdf2stm <- da_STMvsYTHDF2_STM$log2FoldChange[
+    match(number_m6A_glori$Gene_ID, rownames(da_STMvsYTHDF2_STM))
+]
+
+ggplot(number_m6A_glori[number_m6A_glori$location!= "NO",], 
+    aes(fill = bin_m6A, y = log2FC_stm_ythdf2stm, x = location)) + 
+         geom_boxplot(outlier.shape = NA)+ 
+         coord_cartesian(ylim = c(-1.5, 1.5)) + 
+         labs(title = "The m6A number and STM vs STM+YTHDF2",
+              y = "LFC STM KD vs YTHDF2+STM") + 
+         geom_hline(yintercept = 0, linetype = 2) +
+         scale_fill_brewer(palette="GnBu")
+```
+
+# YTHDF2 binding/non-binding m6A and genes
+
+## Do both of the genes with/without YTHDF2 binding shows the positive correlation in CDS?
+
+```{r}
+ythdf2_peaks <- all_DRACN
+## select the gene without DF2 binding at CDS
+number_m6A_glori_non_df2 <- number_m6A_glori[!number_m6A_glori$Gene_ID %in% 
+                                                 ythdf2_peaks$Gene_ID[ythdf2_peaks$location == "CDS"],]
+number_m6A_glori_non_df2 <-  number_m6A_glori_non_df2[number_m6A_glori_non_df2$location!= "NO",]
+p1 <- ggplot(number_m6A_glori_non_df2, aes(x = location, fill = bin_m6A)) + 
+    geom_bar(position = "dodge")+ 
+    geom_text(aes(label = ..count..), stat = "count", position = position_dodge(width = .9))  +
+    scale_fill_brewer(palette="GnBu")
+
+p2 <- ggplot(number_m6A_glori_non_df2, 
+       aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A but without YTHDF2 CDS binding (", 
+                        length(unique(number_m6A_glori_non_df2$Gene_ID)),
+                        ")"))
+p1+p2
+```
+
+```{r fig.height=4, fig.width=9}
+## select the gene with DF2 binding at CDS
+number_m6A_glori_df2 <- number_m6A_glori[number_m6A_glori$Gene_ID %in% 
+                                             ythdf2_peaks$Gene_ID[ythdf2_peaks$location == "CDS"],]
+number_m6A_glori_df2 <-  number_m6A_glori_df2[number_m6A_glori_df2$location!= "NO",]
+
+p1 <- ggplot(number_m6A_glori_df2, aes(x = location, fill = bin_m6A)) + 
+    geom_bar(position = "dodge")+ 
+    geom_text(aes(label = ..count..), stat = "count", position = position_dodge(width = .9))  +
+    scale_fill_brewer(palette="GnBu")
+
+p2 <- ggplot(number_m6A_glori_df2, 
+       aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A and YTHDF2 CDS binding (", 
+                        length(unique(number_m6A_glori_df2$Gene_ID)),
+                        ")"))
+p1+p2
+```
+
+## Do both of genes that with/without CDS YTHDF2 binding enrich in the p-body?
+
+```{r fig.height=7, fig.width=8}
+## load p-body enrichment result
+p_body <- readxl::read_xlsx("~/Desktop/Data/GEO/P_body_and_stress_granule/p_body.xlsx") %>% 
+    as.data.frame(.)
+p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)` <- 
+    as.numeric(p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)`)
+number_m6A_glori_df2$LFC_p_body <- p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)`[match(substr(number_m6A_glori_df2$Gene_ID,1,15), p_body$`Ensembl Gene ID`)]
+
+## select the gene without DF2 binding at 3'UTR
+number_m6A_glori_non_df2$LFC_p_body <- 
+    p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)`[
+        match(substr(number_m6A_glori_non_df2$Gene_ID,1,15), p_body$`Ensembl Gene ID`)]
+
+p1 <- ggplot(number_m6A_glori_non_df2, 
+       aes(x = location, y = LFC_p_body, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-4, 4)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("Genes with m6A but not YTHDF2 binding at CDS (", 
+                        length(unique(number_m6A_glori_non_df2$Gene_ID)),
+                        ")"))
+p2 <- ggplot(number_m6A_glori_df2, 
+       aes(x = location, y = LFC_p_body, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-4, 4)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A and YTHDF2 CDS binding (", 
+                        length(unique(number_m6A_glori_df2$Gene_ID)),
+                        ")")) 
+p1/p2
+```
+
+```{r fig.height=5, fig.width=5}
+number_m6A_glori_non_df2 <- mutate(number_m6A_glori_non_df2, YTHDF2_binding_at_CDS = "Without")
+number_m6A_glori_df2 <- mutate(number_m6A_glori_df2, YTHDF2_binding_at_CDS = "With")
+
+rbind(number_m6A_glori_non_df2, number_m6A_glori_df2) %>%
+    ggplot(., aes(x = LFC_p_body, color = YTHDF2_binding_at_CDS)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "LFC for P-body enrichment") + 
+    coord_cartesian(xlim = c(-5,5)) 
+ggsave(device = "pdf", "pics/P-bodies enrichment for DF2 binding at CDS.pdf")
+```
+
+\FloatBarrier
+
+## YTHDF2 binding at 3'UTR
+
+```{r}
+## select the gene without DF2 binding at 3'UTR
+number_m6A_glori_non_df2 <- number_m6A_glori[!number_m6A_glori$Gene_ID %in% 
+                                                 ythdf2_peaks$Gene_ID[ythdf2_peaks$location == "UTR3"],]
+number_m6A_glori_non_df2 <-  number_m6A_glori_non_df2[number_m6A_glori_non_df2$location!= "NO",]
+p1 <- ggplot(number_m6A_glori_non_df2, aes(x = location, fill = bin_m6A)) + 
+    geom_bar(position = "dodge")+ 
+    geom_text(aes(label = ..count..), stat = "count", position = position_dodge(width = .9))  +
+    scale_fill_brewer(palette="GnBu")
+
+p2 <- ggplot(number_m6A_glori_non_df2, 
+       aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A but without YTHDF2 3'UTR binding (", 
+                        length(unique(number_m6A_glori_non_df2$Gene_ID)),
+                        ")"))
+p1+p2
+```
+
+```{r fig.height=4, fig.width=9}
+number_m6A_glori_df2 <- number_m6A_glori[number_m6A_glori$Gene_ID %in% 
+                                             ythdf2_peaks$Gene_ID[ythdf2_peaks$location == "UTR3"],]
+number_m6A_glori_df2 <-  number_m6A_glori_df2[number_m6A_glori_df2$location!= "NO",]
+
+p1 <- ggplot(number_m6A_glori_df2, aes(x = location, fill = bin_m6A)) + 
+    geom_bar(position = "dodge")+ 
+    geom_text(aes(label = ..count..), stat = "count", position = position_dodge(width = .9))  +
+    scale_fill_brewer(palette="GnBu")
+
+p2 <- ggplot(number_m6A_glori_df2, 
+       aes(x = location, y = log2FC_stm_6h, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A and YTHDF2 3'UTR binding (", 
+                        length(unique(number_m6A_glori_df2$Gene_ID)),
+                        ")"))
+p1+p2
+```
+
+## Do both of genes that with/without YTHDF2 binding at 3'UTR enrich in the p-body?
+
+```{r}
+number_m6A_glori_df2$LFC_p_body <- p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)`[match(substr(number_m6A_glori_df2$Gene_ID,1,15), p_body$`Ensembl Gene ID`)]
+
+number_m6A_glori_non_df2$LFC_p_body <- 
+    p_body$`RNA enrichment in P-body (log2) (Fold change=sorted P-bodies/pre-sorted fraction)`[
+        match(substr(number_m6A_glori_non_df2$Gene_ID,1,15), p_body$`Ensembl Gene ID`)]
+
+ggplot(number_m6A_glori_non_df2, 
+       aes(x = location, y = LFC_p_body, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-3, 3)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("Genes with m6A but not YTHDF2 binding at 3'UTR (", 
+                        length(unique(number_m6A_glori_non_df2$Gene_ID)),
+                        ")"))
+```
+
+```{r}
+ggplot(number_m6A_glori_df2, 
+       aes(x = location, y = LFC_p_body, fill = bin_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-4, 4)) + 
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") + 
+    labs(title = paste0("With m6A and YTHDF2 3'UTR binding (", 
+                        length(unique(number_m6A_glori_df2$Gene_ID)),
+                        ")"))
+```
+
+# Stoichiometry comparison
+
+```{r}
+m6A_hek_DRACN <- m6A_hek_GLORI[grep(DRACN, m6A_hek_GLORI$kmer5)]
+m6A_hek_DRACN <- m6A_hek_DRACN[m6A_hek_DRACN$Gene_ID != "Nan"]
+
+m6A_hek_DRACN$group <- paste0(m6A_hek_DRACN$location, m6A_hek_DRACN$Gene_ID)
+number_m6A_glori$group <- paste0(number_m6A_glori$location, number_m6A_glori$Gene_ID)
+
+m6A_hek_DRACN$bin_m6A <- number_m6A_glori$bin_m6A[match(m6A_hek_DRACN$group, number_m6A_glori$group)]
+m6A_hek_DRACN$location <- factor(m6A_hek_DRACN$location, levels = c("UTR5", "CDS", "UTR3"))
+
+m6A_hek_DRACN$ythdf2_cds_binding <- 
+    ifelse(m6A_hek_DRACN$Gene_ID %in% ythdf2_peaks$Gene_ID[ythdf2_peaks$location == "CDS"], 
+           "Bound", "Not bound")
+
+ggplot(as.data.frame(m6A_hek_DRACN),
+       aes(x = bin_m6A, fill = ythdf2_cds_binding, y = m6A_lvl_avg)) + 
+    geom_boxplot(outlier.shape = NA) +
+    labs(x = "m6A number",
+         y = "Stoichiometry")  + 
+    facet_wrap(~ location)
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

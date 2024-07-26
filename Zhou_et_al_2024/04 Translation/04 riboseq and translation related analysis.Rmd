@@ -1,0 +1,1980 @@
+---
+title: "04 Riboseq and translation related analysis"
+author: "You Zhou"
+date: "`r format(Sys.time(), '%B %e, %Y')`"
+output:
+  bookdown::pdf_document2:
+    keep_tex: yes
+    fig_caption: yes
+    number_sections: no
+    toc: yes
+    toc_depth: 3
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: yes
+    number_sections: no
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    toc_collapsed: yes
+    fig_width: 8 
+    fig_height: 4 
+graphics: yes
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+geometry: margin=1in
+fontsize: 18pt
+---
+
+```{r knitr off, echo=FALSE, message=FALSE,cache=FALSE, results="hide", render=FALSE ,warning=FALSE}
+knitr::opts_chunk$set(echo=F, error=FALSE, warning=FALSE,message=FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(xlsx)
+library(keras)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(tidyverse)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(adabag)
+library(rtracklayer)
+library(Rsamtools)
+library(ranger)
+library(cliProfiler)
+library(ggpointdensity)
+library(tensorflow)
+library(keras)
+library(Rtsne)
+library(patchwork)
+library(ggthemr)
+library(ggpubr)
+library(ggrastr)
+library(forcats)
+library(ComplexHeatmap)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#E41A1C"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold"),
+      axis.title.x=element_text(size = font_szie, face="bold"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90),
+      plot.title = element_text(size = font_szie, face="bold"),
+      legend.text = element_text(size = font_szie, face="bold"),
+      legend.title = element_text(size = font_szie, face="bold"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"))
+)
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = 1))
+update_geom_defaults("hline",   list(color = "#993404", size = 1))
+update_geom_defaults("abline",   list(color = "#993404", size = 1))
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+```
+
+# Introduction
+This script includes all the code for the Ribo-seq and translation related analysis
+
+---
+
+# RNAseq for emetine treatment
+
+```{r}
+## filtering parameteres
+pvalue <- 0.05
+basemean <- 10
+## data loading
+path.to.data <- "~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/"
+## DESeq2 for emetine treatment
+path_count <- "~/Desktop/Data/GEO/emetine_hek/count/"
+files_c <- list.files(path_count)
+## read read count
+df_count <- sapply(files_c, function(x){
+  tmp <- read.table(paste0(path_count, x), header = T)[,c(1,7)]
+  v <- tmp[,2]
+  names(v) <- tmp[,1]
+  v
+})
+## condition names
+colnames(df_count) <- c(rep(c("WT", "EM30", "EM120"), each = 3))
+
+## deseq2
+condition_deseq <- data.frame(condition = rep(c("WT", "EM30", "EM120"), each = 3),
+                              rep = c(rep(c("1", "2", "3"), 3)))
+dds_eme <- DESeqDataSetFromMatrix(countData = df_count,
+                              colData = condition_deseq,
+                              design = ~ condition)
+keep <- rowSums(counts(dds_eme)) >= 1
+dds_eme <- dds_eme[keep,]
+dds_eme <- DESeq(dds_eme)
+res_eme120 <- results(dds_eme, contrast = c("condition", "EM120", "WT")) %>% as.data.frame()
+## save da result for emetine treatment
+# saveRDS(res_eme120, paste0(path.to.data, "da_emetine.rds"))
+## filtering
+res_eme120 <- res_eme120 %>% filter(baseMean > 10)
+
+## load m6A
+m6A_hek_GLORI <- readRDS(paste0(path.to.data, "m6A_hek_GLORI_assigned.rds"))
+
+## calculate the m6A number and the assignment for padj and log2 fold change
+m6A_number_glori <- as.data.frame(m6A_hek_GLORI) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop") %>%
+    filter(location != "NO")
+##  assign LFC upon emetine to genes
+m6A_number_glori$log2FC_emetine <- res_eme120$log2FoldChange[match(m6A_number_glori$Gene_ID,
+                                                               rownames(res_eme120))]
+```
+
+\FloatBarrier
+
+## Boxplot for emetine treatment
+
+```{r fig.height=3, fig.width=3}
+m6A_number_glori$bin_m6A <- cut(m6A_number_glori$number, breaks = c(0,4,8,12,Inf))
+m6A_number_glori$location <- factor(m6A_number_glori$location, levels = c("UTR5", "CDS", "UTR3", "NO"))
+ggplot(m6A_number_glori[m6A_number_glori$location != "NO",], 
+       aes(x = location, fill = bin_m6A, y = log2FC_emetine)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu")
+```
+
+\FloatBarrier
+
+# Translation effeciency calculation
+This section includes the code for the translation efficiency (TE) calculation. We used the genes 
+without m6A sites for the size factor estimation. The counting step for TE calculation is against 
+CDS since Riboseq should only capture the signal at CDS.
+
+```{r}
+## load the read count for ribo seq
+path.ribo.count <- "~/Desktop/Data/riboseq/imb_koenig_2022_16/count_cds/"
+file.count.mc <- list.files(path.ribo.count, "MC")
+
+## read counts for matched RNAseq in cds
+rna.df <- read.table("~/Desktop/Data/RNAseq/6hSTM_along_Riboseq/count_6hSTM_ranseq_cds.txt",
+                     header = T)[,-c(2:6)]
+rownames(rna.df) <- rna.df$Geneid
+rna.df$Geneid <- NULL
+
+colnames(rna.df) <- c("WT_1", "WT_2", "WT_3", "WT_4","STM_1", "STM_2", "STM_3","STM_4")
+rna.df <- as.data.frame(rna.df)
+
+ribo.df <- sapply(file.count.mc, function(x){
+    tmp <- read.table(paste0(path.ribo.count, x), header = T)[,c(1,7)]
+    v <- tmp[,2]
+    names(v) <- tmp[,1]
+    return(v)
+})
+
+colnames(ribo.df) <- c("WT_1_ribo", "WT_2_ribo", "STM_1_ribo", "STM_2_ribo")
+ribo.df <- as.data.frame(ribo.df)
+
+## merge the count table from riboseq and RNAseq by rownames
+all.df <- merge(rna.df, ribo.df, by = 0)
+rownames(all.df) <- all.df$Row.names
+all.df$Row.names <- NULL
+
+## condition
+condition_deseq <- data.frame(condition = c("WT", "WT", "WT", "WT","STM", "STM", "STM", "STM",
+                                            "WT", "WT", "STM", "STM"),
+                              seqtype = c(rep("RNAseq", 8), rep("Ribo", 4)))
+
+## normalization
+dds.all <- DESeqDataSetFromMatrix(countData = all.df,
+                              colData = condition_deseq,
+                              design = ~ condition+seqtype+condition:seqtype)
+
+keep <- rowSums(counts(dds.all)) >= 1
+dds.all <- dds.all[keep,]
+dds.all <- DESeq(dds.all)
+
+## extract the normalized read counts for the translation efficiency calculation
+count.df <- counts(dds.all, normalize = T) %>% as.data.frame()
+
+## mean value for each condition
+count.df$mean_WT_rna <- (count.df$WT_1+count.df$WT_2+count.df$WT_3)/3
+count.df$mean_STM_rna <- (count.df$STM_1+count.df$STM_2+count.df$STM_3)/3
+count.df$mean_WT_ribo <- (count.df$WT_1_ribo+count.df$WT_2_ribo)/2
+count.df$mean_STM_ribo <- (count.df$STM_1_ribo+count.df$STM_2_ribo)/2
+
+## TE calculation
+count.df$TE_wt <- count.df$mean_WT_ribo/count.df$mean_WT_rna
+count.df$TE_stm <- count.df$mean_STM_ribo/count.df$mean_STM_rna
+
+## df filtering based on the mean read count and remove outliers
+count.df.f <- count.df[which(count.df$mean_WT_rna > 5 &
+                             count.df$mean_STM_rna > 5 &
+                             count.df$mean_WT_ribo > 5 &
+                             count.df$mean_STM_ribo > 5),] %>%
+    filter(., TE_wt < 100 & TE_stm < 100)
+## LFC of TE
+count.df.f$TE_log2FC <- log2((count.df.f$TE_stm)/(count.df.f$TE_wt))
+count.df.f$gene_id <- rownames(count.df.f)
+
+saveRDS(count.df.f, paste0(path.to.data, "TE_HEK_matched_RNAseq.rds"))
+TE.table <- count.df.f[,c(20,17,18,19,1:16)]
+colnames(TE.table) <- c("gene_id", "TE_WT", "TE_STM", "TE_log2FC_upon_STM",
+                        "Normalized_WT_1_RNAseq", "Normalized_WT_2_RNAseq",
+                        "Normalized_WT_3_RNAseq", "Normalized_WT_4_RNAseq",
+                        "Normalized_STM_1_RNAseq", "Normalized_STM_2_RNAseq",
+                        "Normalized_STM_3_RNAseq", "Normalized_STM_4_RNAseq",
+                        "Normalized_WT_1_Riboseq", "Normalized_WT_2_Riboseq",
+                        "Normalized_STM_1_Riboseq", "Normalized_STM_2_Riboseq",
+                        "WT_mean_RNAseq", "STM_mean_RNAseq", "WT_mean_Riboseq", "STM_mean_Riboseq")
+write.table(TE.table, "GEO_TE.txt", sep = "\t", row.names = FALSE)
+write.csv(TE.table, "GEO_TE.csv", row.names = FALSE)
+```
+
+```{r fig.height=4, fig.width=4}
+ggplot(count.df.f, aes(x = TE_wt, y = TE_stm)) + 
+    rasterise(geom_pointdensity(), dpi = 600) + 
+    stat_cor(label.y = 9.5) + 
+    coord_cartesian(ylim = c(0,10),
+                    xlim = c(0, 10)) + 
+    geom_abline(linetype = 2)
+```
+
+## Does m6A leads to TE changes?
+
+```{r}
+m6A_number_glori$TE_log2FC <- count.df.f$TE_log2FC[match(
+    m6A_number_glori$Gene_ID, rownames(count.df.f)
+)]
+
+ggplot(m6A_number_glori[m6A_number_glori$location != "NO",], 
+       aes(x = location, fill = bin_m6A, y = TE_log2FC)) + 
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-0.8,0.5)) +
+    geom_hline(yintercept = 0, linetype = 2) +
+    scale_fill_brewer(palette="GnBu") +
+    labs(y = "LFC of TE (STM2457 vs WT)")
+```
+
+# The correlation between the TE and different treatments using GLORI m6A sites (HEK)
+
+## STM2457 treatment with miCLIP m6A
+
+```{r fig.height=4, fig.width=9}
+## load STM DA result
+da_stm_6h <-
+  read_Anke_DA(paste0(path.to.data, "sR18_STM.vs.sR18_DMSO.csv"))
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv"))
+da_stm_24h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_24h_STM2457.vs.HEK293T_24h_DMSO.csv"))
+## miCLIP m6A
+m6A_hek_miCLIP <- readRDS(paste0(path.to.data, "m6A_hek_miCLIP_assigned.rds"))
+m6A_number_miCLIP <- as.data.frame(m6A_hek_miCLIP) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n())
+m6A_number_miCLIP$bin_m6A <- cut(m6A_number_miCLIP$number, breaks = c(0,2,4,6,Inf))
+m6A_number_miCLIP$location <- factor(m6A_number_miCLIP$location,
+                                     levels = c("UTR5", "CDS", "UTR3", "NO"))
+
+## assign log2FC and TE to genes
+m6A_number_miCLIP$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_6h$gene_id)
+]
+m6A_number_miCLIP$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_9h$gene_id)
+]
+m6A_number_miCLIP$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(m6A_number_miCLIP$Gene_ID, da_stm_24h$gene_id)
+]
+
+m6A_number_miCLIP$TE_wt <- count.df.f$TE_wt[match(m6A_number_miCLIP$Gene_ID, rownames(count.df.f))]
+m6A_number_miCLIP$bin_te <- cut(m6A_number_miCLIP$TE_wt, breaks = c(seq(0, 1.5, 0.5), Inf))
+
+## plot
+ggplot(m6A_number_miCLIP[!is.na(m6A_number_miCLIP$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_6h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM6h effect correlates to TE (miCLIP)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(m6A_number_miCLIP[!is.na(m6A_number_miCLIP$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_9h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM9h effect correlates to TE (miCLIP)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(m6A_number_miCLIP[!is.na(m6A_number_miCLIP$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_24h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM24h effect correlates to TE (miCLIP)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+## STM2457 treatment with GLORI m6A
+
+```{r}
+## GLORI m6A
+m6A_number_GLORI <- as.data.frame(m6A_hek_GLORI) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n())
+m6A_number_GLORI$bin_m6A <- cut(m6A_number_GLORI$number, breaks = c(0,4,8,12,Inf))
+m6A_number_GLORI$location <- factor(m6A_number_GLORI$location,
+                                     levels = c("UTR5", "CDS", "UTR3", "NO"))
+
+## assign log2FC and TE to gene
+m6A_number_GLORI$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(m6A_number_GLORI$Gene_ID, da_stm_6h$gene_id)
+]
+m6A_number_GLORI$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(m6A_number_GLORI$Gene_ID, da_stm_9h$gene_id)
+]
+m6A_number_GLORI$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(m6A_number_GLORI$Gene_ID, da_stm_24h$gene_id)
+]
+
+m6A_number_GLORI$TE_wt <- count.df.f$TE_wt[match(m6A_number_GLORI$Gene_ID, rownames(count.df.f))]
+m6A_number_GLORI$bin_te <- cut(m6A_number_GLORI$TE_wt, breaks = c(seq(0, 1.5, 0.5), Inf))
+
+## plot
+ggplot(m6A_number_GLORI[!is.na(m6A_number_GLORI$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_6h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM6h effect correlates to TE (GLORI)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(m6A_number_GLORI[!is.na(m6A_number_GLORI$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_9h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM9h effect correlates to TE (GLORI)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+```{r fig.height=4, fig.width=9}
+ggplot(m6A_number_GLORI[!is.na(m6A_number_GLORI$TE_wt),], 
+       aes(x = bin_m6A, y = log2FC_stm_24h, fill = bin_te)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "m6A number",
+         fill = "TE", title = "STM24h effect correlates to TE (GLORI)") + 
+    facet_wrap(~location) + 
+    geom_hline(yintercept = 0, linetype = 2)  +
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    scale_fill_brewer(palette="Oranges")
+```
+
+## Boruta to prove the TE have an effect on predicting log2FC upon stm 6h
+
+```{r eval=FALSE, include=TRUE}
+library(Boruta)
+## number of m6A miCLIP
+make_boruta_df_miCLIP <- function(da, number_m6A){
+    data <- data.frame(gene_id = da$gene_id, log2FC = da$log2FC)
+
+    ## extract the m6A number in different genomic location
+    tmp_utr5 <- number_m6A[number_m6A$location == "UTR5",]
+    tmp_cds <- number_m6A[number_m6A$location == "CDS",]
+    tmp_utr3 <- number_m6A[number_m6A$location == "UTR3",]
+    
+    ## assign the m6A number to data
+    data$n_m6A_UTR5 <- tmp_utr5$number[match(data$gene_id, tmp_utr5$Gene_ID)]
+    data$n_m6A_CDS <- tmp_cds$number[match(data$gene_id, tmp_cds$Gene_ID)]
+    data$n_m6A_UTR3 <- tmp_utr3$number[match(data$gene_id, tmp_utr3$Gene_ID)]
+    
+    ## replace NA to 0
+    data[is.na(data)] <- 0
+    ## remove genes without m6A
+    data <- data[rowSums(data == 0) < 3,]
+
+    return(data)
+}
+
+## make data frame to run Boruta for STM 6h
+df_stm6h <- make_boruta_df_miCLIP(da_stm_6h, m6A_number_glori)
+df_stm6h$TE <- count.df.f$TE_wt[match(df_stm6h$gene_id , rownames(count.df.f))]
+df_stm6h <- df_stm6h[!is.na(df_stm6h$TE),]
+df_stm6h$gene_id <- NULL
+set.seed(3)
+boruta_output <- Boruta(log2FC ~ ., data=na.omit(df_stm6h), doTrace=0)
+saveRDS(boruta_output, "rds/boruta_hek_glori_TE_stm6h.rds")
+```
+
+```{r}
+## plotting the boruta result
+plot_boruta <- function(boruta_output, title = ""){
+    boruta_output_importance <- 
+        boruta_output$finalDecision %>%
+        as.data.frame()
+    dd <- data.frame(. = c(rep("Shadow", 3)))
+    rownames(dd) <- c("shadowMax", "shadowMean", "shadowMin")
+    boruta_output_importance <- rbind(boruta_output_importance, dd)
+    df <- as.data.frame(boruta_output$ImpHistory)
+    boruta_output <- 
+        df[,colnames(df) %in% c(rownames(boruta_output_importance))]
+    k <- boruta_output
+    k[k == -Inf] <- 0
+    ord <- apply(k, 2, median)
+    ord <- ord[order(ord, decreasing = T)]
+    df <- data.frame(value = 0, 
+                     feature = "a")
+    for (i in 1:ncol(boruta_output)) {
+        df2 <- data.frame(value = boruta_output[,i],
+                          feature = colnames(boruta_output)[i])
+        df <- rbind(df, df2)
+    }
+    
+    df <- df[-1,]
+    df$feature <- factor(df$feature, levels = names(ord))
+    df$Sig <- boruta_output_importance$.[
+        match(df$feature, rownames(boruta_output_importance))
+    ]
+    df_RPE1 <- df
+    dd <- df %>% group_by(df$feature) %>%
+      summarise(mean = mean(value))
+    
+    df$feature <- as.character(df$feature)
+    df$feature[df$feature == "n_m6A_CDS"] <- "CDS m6A"
+    df$feature[df$feature == "n_m6A_UTR3"] <- "3'UTR m6A"
+    df$feature[df$feature == "n_m6A_UTR5"] <- "5'UTR m6A"
+    df$feature <- factor(df$feature, 
+                         levels = c("CDS m6A", "3'UTR m6A", "5'UTR m6A", "TE",
+                                    "shadowMax", "shadowMean", "shadowMin"))
+    df$Sig <- factor(df$Sig, levels = c("Confirmed", "Shadow", "Tentative", "Rejected"))
+    
+    ggplot(df, aes(x = feature, y = value, fill = Sig)) + 
+        geom_boxplot(outlier.shape = NA) +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+      ggtitle(title) + 
+      labs(y = "Importance", x = NULL)
+}
+```
+
+```{r fig.height=4, fig.width=6}
+boruta_out <- readRDS("rds/boruta_hek_glori_TE_stm6h.rds")
+plot_boruta(boruta_out, "Boruta for HEK GLORI STM6h")
+```
+
+\FloatBarrier
+
+# Select non-m6A DRACN and load riboseq data
+In this section, we will use the 5' end of reads in riboseq data to find out if m6A sites lead to 
+the ribosome pausing. The processing steps for the riboseq data are as follow:      
+
+1) QC with `fastqc`     
+2) Trimming with `trimmomatic`      
+3) Mapping with `STAR`      
+4) Extracting the 5'end position of reads with `bedtools`       
+5) Sorting the `bg` file with `bedtools`     
+6) Converting the `bg` file to `bw` file with `bedGraphToBigWig`        
+
+```{r eval=FALSE, include=T}
+################## Identify the m6A and non-m6A DRACH sites in HEK #########################
+DRACN <- "[GAT][GA]AC[TACG]"
+## pick random control from CDS annotation file
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+## keep only the CDS (no ribo signal in 3'UTR)
+hg38_cds <- hg38[hg38$type == "CDS"]
+## keep the highly reliable annotation files
+hg38_cds <- hg38_cds[hg38_cds$transcript_support_level %in% c("1", "2", "3")]
+## remove duplication positions
+hg38_cds <- IRanges::reduce(hg38_cds)
+## split CDS into 1nt
+hg38_cds_1nt <- GenomicRanges::tile(hg38_cds, width = 1) %>% unlist
+## keep sites on standard chromosomes
+hg38_cds_1nt <- hg38_cds_1nt[seqnames(hg38_cds_1nt) %in% standardChromosomes(hg38_cds_1nt)]
+
+## pre-filtering and keep the nucleotides which 50nt away from m6A
+hg38_cds_1nt <- 
+    subsetByOverlaps(hg38_cds_1nt, c(m6A_hek_GLORI[m6A_hek_GLORI$location == "CDS"], 
+                                     m6A_hek_miCLIP[m6A_hek_miCLIP$location == "CDS"]) + 50, 
+                     invert = T)
+
+## keep only A sites and get the 5mer info around all nocleotides
+seq <- getSeq(Hsapiens, hg38_cds_1nt+2) %>% suppressWarnings()
+hg38_cds_1nt$kmer5 <- seq
+hg38_cds_1nt$seq <- substr(hg38_cds_1nt$kmer5, 3, 3)
+hg38_cds_1nt <- hg38_cds_1nt[hg38_cds_1nt$seq == "A"]
+
+## keep non DRACH A sites              
+all.A.nonDRACH <- hg38_cds_1nt[!grepl(DRACN, hg38_cds_1nt$kmer5)]
+all.A.DRACH <- hg38_cds_1nt[grepl(DRACN, hg38_cds_1nt$kmer5)]
+## save A sites
+saveRDS(all.A.nonDRACH, "rds/HEK_all.A.nonDRACN.rds")
+saveRDS(all.A.DRACH, "rds/HEK_all.A.DRACN.rds")
+
+Hek.all.A.DRACH <- read_rds("rds/HEK_all.A.DRACN.rds")
+Hek.all.A.DRACH <- unique(Hek.all.A.DRACH)
+Hek.all.A.DRACH <- metaGeneProfile(Hek.all.A.DRACH, 
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+used_hg38 <- hg38[hg38$transcript_id %in% Hek.all.A.DRACH$Transcript_ID]
+
+Hek.all.A.DRACH <- dis_to_SS(Hek.all.A.DRACH, used_hg38)
+## force the control sites are close to the splice site to make sure they are not m6A
+Hek.all.A.DRACH <- Hek.all.A.DRACH[Hek.all.A.DRACH$dis_SS <= 150]
+
+## assign the median coverage for the CDS m6A sites from both GLORI and miCLIP
+tmp1 <- m6A_hek_miCLIP[m6A_hek_miCLIP$location == "CDS"]
+tmp2 <- m6A_hek_GLORI[m6A_hek_GLORI$location == "CDS"]
+mcols(tmp1) <- NULL
+mcols(tmp2) <- NULL
+
+m6A_hek <- c(tmp1, tmp2)
+m6A_hek$seq <- getSeq(Hsapiens, m6A_hek+2)
+m6A_hek_DRACH <- m6A_hek[grepl("[GAT][GA]AC[TACG]", m6A_hek$seq)] %>% unique(.)
+
+## random sampling for extracting a comparable control with same amount of 5mer and coverage
+rs.DRACH.nonm6A <- Hek.all.A.DRACH[1]
+for (i in unique(as.character(m6A_hek_DRACH$seq))) {
+    n <- length(m6A_hek_DRACH[m6A_hek_DRACH$seq == i])
+    tmp <- Hek.all.A.DRACH[Hek.all.A.DRACH$kmer5 == i]
+    set.seed(9)
+    ## take a site as start and it will be remove in the end
+    r <- sample(1:length(tmp), n)
+    tmp <- tmp[r]
+    rs.DRACH.nonm6A <- c(rs.DRACH.nonm6A, tmp) ## remove the first sites
+}
+
+## remove the initial one
+rs.DRACH.nonm6A <- rs.DRACH.nonm6A[-1]
+saveRDS(rs.DRACH.nonm6A, "rds/rs.DRACN.nonm6A.new.rds")
+```
+
+```{r eval=FALSE, include=T}
+################## Identify the m6A and non-m6A DRACH sites in mESC #########################
+DRACN <- "[GAT][GA]AC[TACG]"
+## read m6A sites from eTAM seq
+m6A_mESC_eTAM <- 
+    read.table("~/Desktop/Data/m6Asites/GSE211303_mesc.polya.wt.ftom.ftop.rep1.deep.hits.txt",
+               header = T)
+
+m6A_mESC_eTAM$seqnames <- sub("\\_.*", "", m6A_mESC_eTAM$pos)
+m6A_mESC_eTAM$start <- getstr(m6A_mESC_eTAM$pos, "_", 1, "_", 2)
+m6A_mESC_eTAM$end <- m6A_mESC_eTAM$start
+m6A_mESC_eTAM$strand <- sapply(m6A_mESC_eTAM$pos, function(x){
+    substr(x, nchar(x), nchar(x))
+})
+m6A_mESC_eTAM <- makeGRangesFromDataFrame(m6A_mESC_eTAM, keep.extra.columns = T)
+m6A_mESC_eTAM <- metaGeneProfile(m6A_mESC_eTAM, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+## m6A sites from miCLIP
+m6A_mESC_miCLIP <- 
+    readRDS("~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/mouse_m6A.rds")
+m6A_mESC_miCLIP <- metaGeneProfile(m6A_mESC_miCLIP, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+
+mm10 <- import.gff3("~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")
+
+mm10_cds <- mm10[mm10$type == "CDS"] %>% IRanges::reduce(.)
+mm10_cds <- mm10_cds[seqnames(mm10_cds) %in% standardChromosomes(mm10_cds)]
+mm10_cds <- GenomicRanges::tile(mm10_cds, width = 1) %>% unlist(.)
+mm10_cds <- subsetByOverlaps(mm10_cds, c(m6A_mESC_eTAM, m6A_mESC_miCLIP) + 50, invert = TRUE)
+
+mm10_cds$kmer5 <- getSeq(Mmusculus, mm10_cds+2)
+mESC.nonm6A.DRACH <- mm10_cds[grepl(DRACN, mm10_cds$kmer5)]
+
+mESC.nonm6A.DRACH <- metaGeneProfile(mESC.nonm6A.DRACH, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+used_mm10 <- mm10[mm10$transcript_id %in% mESC.nonm6A.DRACH$Transcript_ID]
+mESC.nonm6A.DRACH <- dis_to_SS(mESC.nonm6A.DRACH, used_mm10)
+## force the control sites are close to the splice site to make sure they are not m6A
+mESC.nonm6A.DRACH <- mESC.nonm6A.DRACH[mESC.nonm6A.DRACH$dis_SS <= 150]
+## assign the median coverage for the CDS m6A sites from both GLORI and miCLIP
+tmp1 <- m6A_mESC_miCLIP[m6A_mESC_miCLIP$location == "CDS"]
+tmp2 <- m6A_mESC_eTAM[m6A_mESC_eTAM$location == "CDS"]
+mcols(tmp1) <- NULL
+mcols(tmp2) <- NULL
+
+m6A_mESC <- c(tmp1, tmp2)
+m6A_mESC$seq <- getSeq(Mmusculus, m6A_mESC+2)
+m6A_mESC_DRACH <- m6A_mESC[grepl("[GAT][GA]AC[TACG]", m6A_mESC$seq)] %>% unique(.)
+
+## random sampling for extracting a comparable control with same amount of 5mer and coverage
+rs.mESC.DRACH.nonm6A <- mESC.nonm6A.DRACH[1]
+for (i in unique(as.character(m6A_mESC_DRACH$seq))) {
+    n <- length(m6A_mESC_DRACH[m6A_mESC_DRACH$seq == i])
+    tmp <- mESC.nonm6A.DRACH[mESC.nonm6A.DRACH$kmer5 == i]
+    set.seed(9)
+    ## take a site as start and it will be remove in the end
+    r <- sample(1:length(tmp), n)
+    tmp <- tmp[r]
+    rs.mESC.DRACH.nonm6A <- c(rs.mESC.DRACH.nonm6A, tmp) ## remove the first sites
+}
+
+
+## remove the initial one
+rs.mESC.DRACH.nonm6A <- rs.mESC.DRACH.nonm6A[-1]
+
+saveRDS(rs.mESC.DRACH.nonm6A, "rds/rs.mESC.DRACH.nonm6A_150ntSS_DRACN.rds")
+```
+
+```{r fig.height=3, fig.width=6}
+DRACN <- "[GAT][GA]AC[TACG]"
+## non m6A DRACH in CDS
+rs.DRACH.nonm6A <- readRDS("rds/rs.DRACN.nonm6A.new.rds")
+## m6A DRACH in CDS
+tmp1 <- m6A_hek_miCLIP[m6A_hek_miCLIP$location == "CDS"]
+tmp2 <- m6A_hek_GLORI[m6A_hek_GLORI$location == "CDS"]
+mcols(tmp1) <- NULL
+mcols(tmp2) <- NULL
+## use the m6A from both GLORI and miCLIP for the plot
+m6A_hek <- c(tmp1, tmp2)
+m6A_hek$seq <- getSeq(Hsapiens, m6A_hek+2)
+m6A_hek_DRACH <- m6A_hek[grepl(DRACN, m6A_hek$seq)] %>% unique(.)
+
+## riboseq data in house
+path.bw <- "~/Desktop/Data/riboseq/imb_koenig_2022_16/imb_koenig_2022_16_corovic_riboseq_HEK_STM/bw_readstarts/DR/"
+file.bw.MC.n <- list.files(path.bw, pattern = "MC")[c(seq(1, 8, 2))]
+file.bw.MC.p <- list.files(path.bw, pattern = "MC")[c(seq(2, 8, 2))]
+
+## read bw files and merge the signal for replicates
+## MC negative strand 
+list.mc.n <- lapply(file.bw.MC.n, function(x){
+    tmp <- readBWtoRLE(paste0(path.bw, x))
+    keepStandardChromosomes(tmp)
+    return(tmp)
+})
+## rename
+n <- gsub("imb_koenig_2022_16_", "", file.bw.MC.n)
+n <- gsub("v3.duprm.readstarts.minus.bw", "", n)
+names(list.mc.n) <- n
+
+WT.MC.n <- list.mc.n$DMSO1_MC+list.mc.n$DMSO2_MC
+STM.MC.n <- list.mc.n$STM1_MC+list.mc.n$STM2_MC
+
+## MC positive strand
+list.mc.p <- lapply(file.bw.MC.p, function(x){
+    tmp <- readBWtoRLE(paste0(path.bw, x))
+    keepStandardChromosomes(tmp)
+    return(tmp)
+})
+n <- gsub("imb_koenig_2022_16_", "", file.bw.MC.p)
+n <- gsub("v3.duprm.readstarts.plus.bw", "", n)
+names(list.mc.p) <- n
+
+## combine the riboseq signal based on the treatment
+WT.MC.p <- list.mc.p$DMSO1_MC+list.mc.p$DMSO2_MC
+STM.MC.p <- list.mc.p$STM1_MC+list.mc.p$STM2_MC
+```
+
+
+```{r}
+## load control sites
+rs.mESC.DRACH.nonm6A <-  readRDS("rds/rs.mESC.DRACH.nonm6A_150ntSS_DRACN.rds")
+
+## read m6A sites from eTAM seq
+m6A_mESC_eTAM <- 
+    read.table("~/Desktop/Data/m6Asites/GSE211303_mesc.polya.wt.ftom.ftop.rep1.deep.hits.txt",
+               header = T)
+
+m6A_mESC_eTAM$seqnames <- sub("\\_.*", "", m6A_mESC_eTAM$pos)
+m6A_mESC_eTAM$start <- getstr(m6A_mESC_eTAM$pos, "_", 1, "_", 2)
+m6A_mESC_eTAM$end <- m6A_mESC_eTAM$start
+m6A_mESC_eTAM$strand <- sapply(m6A_mESC_eTAM$pos, function(x){
+    substr(x, nchar(x), nchar(x))
+})
+m6A_mESC_eTAM <- makeGRangesFromDataFrame(m6A_mESC_eTAM, keep.extra.columns = T)
+## assign gene to eTAMseq m6A sites
+m6A_mESC_eTAM <- metaGeneProfile(m6A_mESC_eTAM, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+## m6A sites from miCLIP
+m6A_mESC_miCLIP <- 
+    readRDS("~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Data/mouse_m6A.rds")
+m6A_mESC_miCLIP <- metaGeneProfile(m6A_mESC_miCLIP, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+
+## extract m6A at CDS
+tmp1 <- m6A_mESC_miCLIP[m6A_mESC_miCLIP$location == "CDS"]
+tmp2 <- m6A_mESC_eTAM[m6A_mESC_eTAM$location == "CDS"]
+mcols(tmp1) <- NULL
+mcols(tmp2) <- NULL
+
+## use the m6A sites from both eTAMseq and miCLIP for the plot
+m6A_mESC <- c(tmp1, tmp2)
+m6A_mESC$seq <- getSeq(Mmusculus, m6A_mESC+2)
+m6A_mESC_DRACH <- m6A_mESC[grepl(DRACN, m6A_mESC$seq)] %>% unique(.)
+```
+
+\FloatBarrier
+
+```{r}
+## load annotation file
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")
+## extract the annotation file that with GLORI m6A sites
+used_hg38 <- hg38[hg38$transcript_id %in% m6A_hek_GLORI$Transcript_ID]
+## calculate the distance between m6A and start codon
+m6A_hek_GLORI <- start_codon_abs_profile(m6A_hek_GLORI, used_hg38)
+## extract m6A in CDS
+m6A_glori_cds_gr <- m6A_hek_GLORI[m6A_hek_GLORI$location == "CDS"]
+## calculate the position in frame based on the distance to the first nucleotide in start codon
+m6A_glori_cds_gr$position_in_frame <- (m6A_glori_cds_gr$dist_to_start_co+1)%%3
+m6A_glori_cds_gr$position_in_frame[m6A_glori_cds_gr$position_in_frame == 0] <- 3
+m6A_glori_cds_gr$position_in_frame <- as.character(m6A_glori_cds_gr$position_in_frame)
+
+## keep the sites which can be assigned to frame for the following analysis
+m6A_glori_cds_gr <- m6A_glori_cds_gr[!is.na(m6A_glori_cds_gr$position_in_frame)]
+
+m6A_glori_cds_gr$kmer5 <- getSeq(Hsapiens, m6A_glori_cds_gr+2) %>% suppressWarnings(.)
+## keep only the DRACH sites
+m6A_glori_cds_gr <- m6A_glori_cds_gr[grep(DRACN, m6A_glori_cds_gr$kmer5)]
+
+## extract the transcript with random select non m6A DRACH
+hg38_used <- hg38[hg38$transcript_id %in% rs.DRACH.nonm6A$Transcript_ID]
+## distance to start codon
+rs.DRACH.nonm6A <- start_codon_abs_profile(rs.DRACH.nonm6A, hg38_used)
+## extract sites in CDS
+rs.DRACH.nonm6A <- rs.DRACH.nonm6A[rs.DRACH.nonm6A$location == "CDS"]
+## calculate the position in frame
+rs.DRACH.nonm6A$position_in_frame <- (rs.DRACH.nonm6A$dist_to_start_co+1)%%3
+rs.DRACH.nonm6A$position_in_frame[rs.DRACH.nonm6A$position_in_frame == 0] <- 3
+rs.DRACH.nonm6A$position_in_frame <- as.character(rs.DRACH.nonm6A$position_in_frame)
+rs.DRACH.nonm6A_f <- rs.DRACH.nonm6A[!is.na(rs.DRACH.nonm6A$position_in_frame)]
+```
+
+\FloatBarrier
+
+# Ribosome signal has a higher density around m6A sites in WT than in STM/Mettl3 KO
+
+```{r}
+## sum riboseq counts for each condition
+ribo.df$wt_sum <- ribo.df$WT_1_ribo + ribo.df$WT_2_ribo
+ribo.df$stm_sum <- ribo.df$STM_1_ribo + ribo.df$STM_2_ribo  
+
+## keep the m6A and non m6A DRACH sites with ribo signal
+m6A_cds_f <- m6A_glori_cds_gr[m6A_glori_cds_gr$Gene_ID %in% count.df.f$gene_id]
+nonm6A_cds_f <- rs.DRACH.nonm6A_f[rs.DRACH.nonm6A_f$Gene_ID %in% count.df.f$gene_id]
+
+## load A sites as control
+A_non_DRACN <- readRDS("~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/04 Translation related analysis/rds/HEK_all.A.nonDRACN.rds") 
+## make sure the A sites are not m6A
+A_non_DRACN <- subsetByOverlaps(A_non_DRACN, m6A_hek_GLORI, invert = T) %>% unique(.)
+## assign gene to A sites
+A_non_DRACN <- metaGeneProfile(A_non_DRACN,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+A_non_DRACN <- A_non_DRACN[A_non_DRACN$Gene_ID %in% count.df.f$gene_id]
+A_non_DRACN <- A_non_DRACN[A_non_DRACN$location == "CDS"]
+## random sampling
+set.seed(10)
+r <- sample(1:length(A_non_DRACN), 70000)
+A_non_DRACN_f <- A_non_DRACN[r]
+```
+
+```{r}
+## function to calculate the riboseq signal density around sites
+lfc_ribo <- function(gr, window.size = 50, range = 1:101,
+                     rle_wt_p, rle_wt_n,
+                     rle_stm_p, rle_stm_n,
+                     name1 = "WT_1_ribo", name2 = "STM_1_ribo"){
+    ## extend the sites to the given window
+    gr <- gr+window.size
+    ## split sites based on strand for the signal assignment
+    gr_n <- gr[strand(gr) == "-"]
+    gr_p <- gr[strand(gr) == "+"]
+    
+    ## assign the signals to each site WT
+    cover_p <- as.matrix(rle_wt_p[gr_p]) %>% as.data.frame(.) %>% .[,range]
+    cover_n <- as.matrix(rle_wt_n[gr_n] ) %>% .[,ncol(.):1] %>% as.data.frame(.) %>% .[,range]
+    cover_p[is.na(cover_p)] <- 0
+    cover_n[is.na(cover_n)] <- 0
+    
+    ## assign the signals to each site STM
+    cover_p_stm <- as.matrix(rle_stm_p[gr_p]) %>% as.data.frame(.) %>% .[,range]
+    cover_n_stm <- as.matrix(rle_stm_n[gr_n] ) %>% .[,ncol(.):1] %>% as.data.frame(.) %>% .[,range]
+    cover_p_stm[is.na(cover_p_stm)] <- 0
+    cover_n_stm[is.na(cover_n_stm)] <- 0
+    
+    ## sum up the ribo signal at given window around sites
+    gr_p$WT_ribo_window <- rowSums(cover_p)
+    gr_n$WT_ribo_window <- rowSums(cover_n)
+    gr_p$STM_ribo_window <- rowSums(cover_p_stm)
+    gr_n$STM_ribo_window <- rowSums(cover_n_stm)
+    
+    out <- c(gr_p, gr_n)
+    
+    ##  assign the overall counts in CDS to output table
+    out$ribo_cds_wt <- ribo.df[, grep(name1, colnames(ribo.df))][
+        match(out$Gene_ID, rownames(ribo.df))]
+    out$ribo_cds_stm <- ribo.df[ ,grep(name2, colnames(ribo.df))][
+        match(out$Gene_ID, rownames(ribo.df))]
+    
+    ## ribosome density calculation
+    out$wt_signal_norm <- out$WT_ribo_window/out$ribo_cds_wt
+    out$stm_signal_norm <- out$STM_ribo_window/out$ribo_cds_stm
+    
+    ## lfc of density upon treatment
+    out$lfc_ribo_stm <- log2(out$stm_signal_norm/out$wt_signal_norm)
+    return(out)
+}
+```
+
+## HEK WT vs STM 101nt surrounding
+
+```{r fig.height=4, fig.width=4}
+## calculate the ribosome density around sites
+m6A_cds_ff <- lfc_ribo(m6A_cds_f, window.size = 50, range = 1:101,
+                      WT.MC.p, WT.MC.n,
+                      STM.MC.p, STM.MC.n,
+                      name1 = "wt_sum", name2 = "stm_sum")
+nonm6A_cds_ff <- lfc_ribo(nonm6A_cds_f, window.size = 50, range = 1:101,
+                      WT.MC.p, WT.MC.n,
+                      STM.MC.p, STM.MC.n,
+                      name1 = "wt_sum", name2 = "stm_sum")
+non_m6A_A_ff <- lfc_ribo(A_non_DRACN_f, window.size = 50, range = 1:101,
+                      WT.MC.p, WT.MC.n,
+                      STM.MC.p, STM.MC.n,
+                      name1 = "wt_sum", name2 = "stm_sum")
+## filtering the sites with low signal
+thresh <- 30
+tmp1 <- m6A_cds_ff[m6A_cds_ff$WT_ribo_window >thresh & m6A_cds_ff$STM_ribo_window >thresh,]
+tmp2 <- nonm6A_cds_ff[nonm6A_cds_ff$WT_ribo_window >thresh & nonm6A_cds_ff$STM_ribo_window >thresh,]
+tmp3 <- non_m6A_A_ff[non_m6A_A_ff$WT_ribo_window >thresh & non_m6A_A_ff$STM_ribo_window >thresh,]
+
+## make df for plotting
+df <- data.frame(lfc_ribo_stm = c(tmp1$lfc_ribo_stm, tmp2$lfc_ribo_stm,
+                                  tmp3$lfc_ribo_stm),
+                 group = c(rep("m6A", length(tmp1)), 
+                           rep("non-m6A DRACN", length(tmp2)),
+                           rep("non-m6A A", length(tmp3))))
+ggplot(df, aes(x = lfc_ribo_stm, color = group)) + 
+    stat_ecdf(size = 0.8) +
+    labs(y = "Accumulated fraction",
+         x = "LFC of surrounding riboseq signal (STM vs WT)",
+         title = "101nt HEK") +
+    coord_cartesian(xlim = c(-1.2,1.2)) + 
+    scale_color_manual(values = c("#F8766D", "darkgrey", "grey"))
+ggsave(device = "pdf","pics/slowdown_m6A_vs_nonm6A.pdf")
+```
+
+## Stoichiometry vs ribosome density
+Here I check the influence of stoichiometry to the ribosome density.
+
+```{r fig.height=4, fig.width=4}
+m6A_cds_ff <- lfc_ribo(m6A_cds_f, window.size = 50, range = 1:101,
+                      WT.MC.p, WT.MC.n,
+                      STM.MC.p, STM.MC.n,
+                      name1 = "wt_sum", name2 = "stm_sum")
+nonm6A_cds_ff <- lfc_ribo(nonm6A_cds_f, window.size = 50, range = 1:101,
+                      WT.MC.p, WT.MC.n,
+                      STM.MC.p, STM.MC.n,
+                      name1 = "wt_sum", name2 = "stm_sum")
+thresh <- 30
+tmp1 <- m6A_cds_ff[m6A_cds_ff$WT_ribo_window >thresh & m6A_cds_ff$STM_ribo_window >thresh,]
+tmp2 <- nonm6A_cds_ff[nonm6A_cds_ff$WT_ribo_window >thresh & nonm6A_cds_ff$STM_ribo_window >thresh,]
+tmp2$bin_stoichiometry2 <- "non-m6A DRACN"
+tmp1$bin_stoichiometry2 <- cut(tmp1$m6A_lvl_avg, breaks = c(0,0.33,0.66,1))
+
+tmp3 <- c(tmp1,tmp2)
+ggplot(as.data.frame(tmp3), 
+       aes(x = lfc_ribo_stm, color = bin_stoichiometry2)) + 
+    stat_ecdf(size = 0.8)+
+    labs(y = "Accumulated fraction",
+         x = "LFC of normalized surrounding riboseq signal (STM vs WT)") +
+    coord_cartesian(xlim = c(-1.2,1.2)) + 
+    scale_color_manual(values = c("#FDD49E", "#FC8D59", "#E34A33","grey"))
+ggsave(device = "pdf","pics/slowdown_stoi.pdf")
+```
+
+## Ribosome density for m6A on different target genes
+
+```{r}
+lfc_threshold <- 0.1 
+pvalue <- 0.05
+basemean <- 10
+## load data
+da_stm_6h <- read_Anke_DA(paste0(path.to.data, "sR18_STM.vs.sR18_DMSO.csv")) %>% 
+  filter(baseMean >= basemean) %>% 
+  dplyr::select(., 1:9) %>%
+  mutate(time = "6h") 
+da_stm_9h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_9h_STM2457.vs.HEK293T_9h_DMSO.csv")) %>% 
+    filter(baseMean >= basemean)  %>% dplyr::select(., 1:9) %>%
+    mutate(time = "9h")
+da_stm_24h <- 
+  read_Anke_DA(paste0(path.to.data, "HEK293T_24h_STM2457.vs.HEK293T_24h_DMSO.csv")) %>%
+    filter(baseMean >= basemean)  %>% dplyr::select(., 1:9) %>%
+    mutate(time = "24h")
+## assign lfc and padj to genes
+number_glori <- as.data.frame(m6A_hek_GLORI) %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop") %>%
+    mutate(bin_m6A = cut(number, breaks = c(0,4,8,12,16,Inf)))
+number_glori$log2FC_stm_6h <- da_stm_6h$log2FC[
+    match(number_glori$Gene_ID, da_stm_6h$gene_id)
+]
+number_glori$padj_stm6h <- da_stm_6h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_6h$gene_id)
+]
+number_glori$log2FC_stm_9h <- da_stm_9h$log2FC[
+    match(number_glori$Gene_ID, da_stm_9h$gene_id)
+]
+number_glori$padj_stm9h <- da_stm_9h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_9h$gene_id)
+]
+number_glori$log2FC_stm_24h <- da_stm_24h$log2FC[
+    match(number_glori$Gene_ID, da_stm_24h$gene_id)
+]
+number_glori$padj_stm24h <- da_stm_24h$BH.adjusted.p.values[
+    match(number_glori$Gene_ID, da_stm_24h$gene_id)
+]
+## identify the target gene for STM treatments
+stm_6h_target <- 
+    number_glori[which(number_glori$log2FC_stm_6h >= lfc_threshold & 
+                           number_glori$padj_stm6h <= pvalue &
+                           number_glori$log2FC_stm_9h >= lfc_threshold &
+                           number_glori$log2FC_stm_24h >= lfc_threshold),] %>%
+    mutate(group = "STM 6h target",
+           gene_id2 = substr(Gene_ID,1,15))
+stm_9h_target <- 
+    number_glori[which(number_glori$log2FC_stm_9h >= lfc_threshold & 
+                           number_glori$padj_stm9h <= pvalue  & 
+                           number_glori$log2FC_stm_24h >= lfc_threshold),] %>%
+    mutate(group = "STM 9h target",
+           gene_id2 = substr(Gene_ID,1,15))
+stm_9h_target <- stm_9h_target[!stm_9h_target$Gene_ID %in% stm_6h_target$Gene_ID,]
+## stm 24h target required the genes do not be up-regulated in 6&9 h STM
+stm_24h_target <- 
+    number_glori[which(number_glori$log2FC_stm_24h >= lfc_threshold & 
+                           number_glori$padj_stm24h <= pvalue),] %>%
+    mutate(group = "STM 24h target",
+           gene_id2 = substr(Gene_ID,1,15))
+stm_24h_target <- stm_24h_target[!stm_24h_target$Gene_ID %in% 
+                                     c(stm_6h_target$Gene_ID, stm_9h_target$Gene_ID),]
+```
+
+```{r fig.height=4, fig.width=4}
+thresh <- 30
+tmp1 <- m6A_cds_ff[m6A_cds_ff$WT_ribo_window >thresh & m6A_cds_ff$STM_ribo_window >thresh,]
+tmp2 <- nonm6A_cds_ff[nonm6A_cds_ff$WT_ribo_window >thresh & nonm6A_cds_ff$STM_ribo_window >thresh,]
+## label genes based on target gene list
+tmp1$stm_target <- case_when(tmp1$Gene_ID %in% stm_6h_target$Gene_ID ~ "STM 6h",
+                                  tmp1$Gene_ID %in% stm_9h_target$Gene_ID ~ "STM 9h",
+                                  tmp1$Gene_ID %in% stm_24h_target$Gene_ID ~ "STM 24h",
+                                  T ~ "NO")
+tmp1$stm_target <- factor(tmp1$stm_target, levels= c( "STM 6h", "STM 9h", 
+                                                                "STM 24h", "NO"))
+df <- data.frame(lfc_ribo_stm = tmp1$lfc_ribo_stm,
+                 stm_target = tmp1$stm_target)
+df2 <- data.frame(lfc_ribo_stm = tmp2$lfc_ribo_stm,
+                 stm_target = "No m6A DRACN")
+df <- rbind(df, df2)
+ggplot(df[df$stm_target != "NO",], 
+       aes(x = lfc_ribo_stm, color = stm_target)) + 
+    stat_ecdf(size = 0.8)+
+    labs(y = "Accumulated fraction",
+         x = "LFC of normalized surrounding riboseq signal (STM vs WT)") +
+    coord_cartesian(xlim = c(-1.2,1.2)) + 
+    scale_color_manual(values = c("#F8766D", "#00BA38", "#619CFF", "grey"))
+ggsave(device = "pdf", "pics/slowdown_m6A_on_target_genes.pdf")
+```
+
+\FloatBarrier
+
+# YTHDF2 binding does not leads to a slow down effect
+
+```{r fig.height=4, fig.width=4}
+## load DF2 binding sites at DRACN
+ythdf2_peaks <- readRDS(paste0(path.to.data, "ythdf2_binding.rds"))
+
+## keep m6A with enough signal
+m6A_cds_fff <- m6A_cds_ff[m6A_cds_ff$WT_ribo_window >thresh & m6A_cds_ff$STM_ribo_window >thresh,]
+## label the m6A based on whether their gene is bound by DF2 binding at CDS or 3'UTR
+m6A_cds_fff$YTHDF2_binding_CDS <- ifelse(m6A_cds_fff %over% ythdf2_peaks, "YES",
+                                         "NO")
+
+ggplot(as.data.frame(m6A_cds_fff[m6A_cds_fff$m6A_lvl_avg > 0.3]), 
+       aes(x = lfc_ribo_stm, color = YTHDF2_binding_CDS)) + 
+    stat_ecdf(size = 0.8)+
+    labs(y = "Accumulated fraction",
+         x = "LFC of normalized surrounding riboseq signal (STM vs WT)",
+         title = "CDS m6A with/without YTHDF2 binding (stoichiometry>0.3)") +
+    coord_cartesian(xlim = c(-1.2,1.2)) + 
+    scale_color_manual(values = c("grey", "#F8766D"))
+ggsave(device = "pdf", "pics/slowdown_m6A_on_ythdf2_bound_gene.pdf")
+```
+
+```{r fig.height=4, fig.width=4}
+ribo_signal <- function(gr, rle_p, rle_n, group_name = "", window.size = 50,
+                        low_count_threshold = 20){
+    ## open a given window for extracting riboseq signal around given sites
+    gr <- gr+window.size
+    ## split the sites based on the strand
+    gr_n <- gr[strand(gr) == "-"]
+    gr_p <- gr[strand(gr) == "+"]
+
+    ## get the truncation signals
+    cover_p <- as.matrix(rle_p[gr_p])
+    cover_n <- as.matrix(rle_n[gr_n] ) %>% .[,ncol(.):1]
+    cover_p[is.na(cover_p)] <- 0
+    cover_n[is.na(cover_n)] <- 0
+    rownames(cover_p) <- gr_p$ID
+    rownames(cover_n) <- gr_n$ID
+    
+    ## combine the signal on positive and negative strand
+    cover <- rbind(cover_p, cover_n)
+    ## remove the sites which have a low coverage
+    cover <- cover[rowSums(cover) >= low_count_threshold,]
+    ## calculate the normalized signal for each site
+    ## here I normalize the signal at each position to the sum of signal in the given window
+    cover_normalized <- t(apply(cover, 1, function(x) x/sum(x)))
+    
+    ## output table
+    df <- data.frame(Signal = colSums(cover_normalized)/nrow(cover),
+                     Position = -window.size:window.size,
+                     Group = group_name)
+   
+    return(df)
+}
+
+## m6A overlap to YTHDF2
+m6A_cds_f$over_df2 <- ifelse(m6A_cds_f %over% ythdf2_peaks, T, F)
+
+df <- ribo_signal(m6A_cds_f[m6A_cds_f$over_df2 == T &
+                                m6A_cds_f$m6A_lvl_avg > 0.3], 
+                  WT.MC.p, WT.MC.n, group_name = "TRUE", window.size = 40)
+
+df2 <- ribo_signal(m6A_cds_f[m6A_cds_f$over_df2 == F &
+                                m6A_cds_f$m6A_lvl_avg > 0.3], 
+                  WT.MC.p, WT.MC.n, group_name = "FALSE", window.size = 40)
+
+df <- rbind(df,df2)
+ggplot(df, aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from riboseq") + 
+  scale_x_continuous(breaks = c(-50,-20, -16,-10,-4,0,10,20,50),
+        labels = c(-50,-20, -16, -10, -4,"A",10,20,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Ribosome footprint around m6A (WT)")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")  +
+    labs(color = "Overlap to YTHDF2: ")
+```
+
+\FloatBarrier
+
+# High ribosome density around m6A in mESC
+
+```{r}
+path.m3 <- "~/Desktop/Data/GEO/Riboseq/mESC_GSE148536/new/"
+file.m3.wt <- list.files(path.m3, pattern = "bw")[1:4]
+file.m3.ko <- list.files(path.m3, pattern = "bw")[5:8]
+
+list.m3.wt <- lapply(file.m3.wt, function(x){
+    tmp <- readBWtoRLE(paste0(path.m3, x))
+    keepStandardChromosomes(tmp)
+    return(tmp)
+})
+
+m3.wt.p <- list.m3.wt[[2]] + list.m3.wt[[4]]
+m3.wt.n <- list.m3.wt[[1]] + list.m3.wt[[3]]
+
+list.m3.ko <- lapply(file.m3.ko, function(x){
+    tmp <- readBWtoRLE(paste0(path.m3, x))
+    keepStandardChromosomes(tmp)
+    return(tmp)
+})
+
+m3.ko.p <- list.m3.ko[[2]] + list.m3.ko[[4]]
+m3.ko.n <- list.m3.ko[[1]] + list.m3.ko[[3]]
+```
+
+```{r}
+count_mESC_ribo_cds <- 
+    read.table("~/Desktop/Data/GEO/Riboseq/mESC/new/count_ribo_cds_mESC_unique.txt",
+                                  header = T)[,c(1,7:10)]
+m6A_mESC_eTAM_cds <- m6A_mESC_eTAM[m6A_mESC_eTAM$location == "CDS"]
+m6A_mESC_eTAM_cds_dracn <- m6A_mESC_eTAM_cds[grep("[GAU][GA]AC[UACG]", m6A_mESC_eTAM_cds$motif)]
+colnames(count_mESC_ribo_cds) <- c("gene_id", "WT1", "WT2", "M3_1", "M3_2")
+
+## calculating the ribosome density
+gr <- m6A_mESC_eTAM_cds_dracn   
+
+gr <- gr+50
+gr_n <- gr[strand(gr) == "-"]
+gr_p <- gr[strand(gr) == "+"]
+
+## the truncation signals
+cover_p <- as.matrix(m3.wt.p[gr_p])
+cover_n <- as.matrix(m3.wt.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p[is.na(cover_p)] <- 0
+cover_n[is.na(cover_n)] <- 0
+
+## the truncation signals STM
+cover_p_stm <- as.matrix(m3.ko.p[gr_p])
+cover_n_stm <- as.matrix(m3.ko.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p_stm[is.na(cover_p_stm)] <- 0
+cover_n_stm[is.na(cover_n_stm)] <- 0
+
+gr_p$WT_ribo_101nt <- rowSums(cover_p)
+gr_n$WT_ribo_101nt <- rowSums(cover_n)
+gr_p$STM_ribo_101nt <- rowSums(cover_p_stm)
+gr_n$STM_ribo_101nt <- rowSums(cover_n_stm)
+
+m6A_cds_mESC <- c(gr_p, gr_n)
+
+##  sum wt riboseq counts
+count_mESC_ribo_cds$wt_sum <- count_mESC_ribo_cds$WT1 + count_mESC_ribo_cds$WT2
+count_mESC_ribo_cds$stm_sum <- count_mESC_ribo_cds$M3_1 + count_mESC_ribo_cds$M3_2        
+
+m6A_cds_mESC$ribo_cds_wt <- count_mESC_ribo_cds$wt_sum[match(m6A_cds_mESC$Gene_ID,
+                                                        count_mESC_ribo_cds$gene_id)]
+m6A_cds_mESC$ribo_cds_stm <- count_mESC_ribo_cds$stm_sum[match(m6A_cds_mESC$Gene_ID,
+                                                          count_mESC_ribo_cds$gene_id)]
+
+m6A_cds_mESC$wt_signal_norm <- m6A_cds_mESC$WT_ribo_101nt/m6A_cds_mESC$ribo_cds_wt 
+m6A_cds_mESC$stm_signal_norm <- m6A_cds_mESC$STM_ribo_101nt/m6A_cds_mESC$ribo_cds_stm
+
+m6A_cds_mESC$lfc_ribo_stm <- log2(m6A_cds_mESC$stm_signal_norm/m6A_cds_mESC$wt_signal_norm)
+
+## control
+gr <- rs.mESC.DRACH.nonm6A   
+
+gr <- gr+50
+gr_n <- gr[strand(gr) == "-"]
+gr_p <- gr[strand(gr) == "+"]
+
+## the truncation signals
+cover_p <- as.matrix(m3.wt.p[gr_p])
+cover_n <- as.matrix(m3.wt.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p[is.na(cover_p)] <- 0
+cover_n[is.na(cover_n)] <- 0
+
+## the truncation signals STM
+cover_p_stm <- as.matrix(m3.ko.p[gr_p])
+cover_n_stm <- as.matrix(m3.ko.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p_stm[is.na(cover_p_stm)] <- 0
+cover_n_stm[is.na(cover_n_stm)] <- 0
+
+gr_p$WT_ribo_101nt <- rowSums(cover_p)
+gr_n$WT_ribo_101nt <- rowSums(cover_n)
+gr_p$STM_ribo_101nt <- rowSums(cover_p_stm)
+gr_n$STM_ribo_101nt <- rowSums(cover_n_stm)
+
+nonm6A_cds_mESC <- c(gr_p, gr_n)
+##  sum wt riboseq counts
+nonm6A_cds_mESC$ribo_cds_wt <- count_mESC_ribo_cds$wt_sum[match(nonm6A_cds_mESC$Gene_ID,
+                                                           count_mESC_ribo_cds$gene_id)]
+nonm6A_cds_mESC$ribo_cds_stm <- count_mESC_ribo_cds$stm_sum[match(nonm6A_cds_mESC$Gene_ID,
+                                                           count_mESC_ribo_cds$gene_id)]
+
+nonm6A_cds_mESC$wt_signal_norm <- nonm6A_cds_mESC$WT_ribo_101nt/nonm6A_cds_mESC$ribo_cds_wt
+nonm6A_cds_mESC$stm_signal_norm <- nonm6A_cds_mESC$STM_ribo_101nt/nonm6A_cds_mESC$ribo_cds_stm
+
+nonm6A_cds_mESC$lfc_ribo_stm <- log2(nonm6A_cds_mESC$stm_signal_norm/nonm6A_cds_mESC$wt_signal_norm)
+
+## control 2
+mESC.A <- readRDS("~/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/04 Translation related analysis/rds/mESC_cds_nonm6A_A.rds")
+
+set.seed(10)
+r <- sample(1:length(mESC.A), 30000)
+mESC.A <- mESC.A[r]
+mESC.A <- metaGeneProfile(mESC.A, 
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+
+gr <- mESC.A   
+
+gr <- gr+50
+gr_n <- gr[strand(gr) == "-"]
+gr_p <- gr[strand(gr) == "+"]
+
+## the truncation signals
+cover_p <- as.matrix(m3.wt.p[gr_p])
+cover_n <- as.matrix(m3.wt.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p[is.na(cover_p)] <- 0
+cover_n[is.na(cover_n)] <- 0
+
+## the truncation signals STM
+cover_p_stm <- as.matrix(m3.ko.p[gr_p])
+cover_n_stm <- as.matrix(m3.ko.n[gr_n] ) %>% .[,ncol(.):1]
+cover_p_stm[is.na(cover_p_stm)] <- 0
+cover_n_stm[is.na(cover_n_stm)] <- 0
+
+gr_p$WT_ribo_101nt <- rowSums(cover_p)
+gr_n$WT_ribo_101nt <- rowSums(cover_n)
+gr_p$STM_ribo_101nt <- rowSums(cover_p_stm)
+gr_n$STM_ribo_101nt <- rowSums(cover_n_stm)
+
+A_cds_mESC <- c(gr_p, gr_n)
+##  sum wt riboseq counts
+A_cds_mESC$ribo_cds_wt <- count_mESC_ribo_cds$wt_sum[match(A_cds_mESC$Gene_ID,
+                                                           count_mESC_ribo_cds$gene_id)]
+A_cds_mESC$ribo_cds_stm <- count_mESC_ribo_cds$stm_sum[match(A_cds_mESC$Gene_ID,
+                                                           count_mESC_ribo_cds$gene_id)]
+
+A_cds_mESC$wt_signal_norm <- A_cds_mESC$WT_ribo_101nt/A_cds_mESC$ribo_cds_wt
+A_cds_mESC$stm_signal_norm <- A_cds_mESC$STM_ribo_101nt/A_cds_mESC$ribo_cds_stm
+
+A_cds_mESC$lfc_ribo_stm <- log2(A_cds_mESC$stm_signal_norm/A_cds_mESC$wt_signal_norm)
+```
+
+```{r fig.height=4, fig.width=4}
+## filtering the sites with low signal
+thresh <- 30
+m6A_cds_mESC_f <- m6A_cds_mESC[which(m6A_cds_mESC$STM_ribo_101nt >=thresh & 
+                                         m6A_cds_mESC$WT_ribo_101nt >=thresh),]
+nonm6A_cds_mESC_f <- nonm6A_cds_mESC[which(nonm6A_cds_mESC$STM_ribo_101nt >=thresh &
+                                               nonm6A_cds_mESC$WT_ribo_101nt >=thresh),]
+A_cds_mESC_f <- A_cds_mESC[which(A_cds_mESC$STM_ribo_101nt >=thresh &
+                                               A_cds_mESC$WT_ribo_101nt >=thresh),]
+
+df <- data.frame(lfc_ribo_stm = c(m6A_cds_mESC_f$lfc_ribo_stm, nonm6A_cds_mESC_f$lfc_ribo_stm,
+                                  A_cds_mESC_f$lfc_ribo_stm),
+                 group = c(rep("m6A", length(m6A_cds_mESC_f)), 
+                           rep("non-m6A DRACN", length(nonm6A_cds_mESC_f)),
+                           rep("non-m6A A", length(A_cds_mESC_f))))
+ggplot(df, aes(x = lfc_ribo_stm, color = group)) + 
+    stat_ecdf(size = 0.8)+
+    labs(y = "Accumulated fraction",
+         x = "LFC of normalized surrounding riboseq signal (Mettl3 KO vs WT)") +
+    coord_cartesian(xlim = c(-1.2,1.2)) +
+    labs(title = "mESC Mettl3 KO") + 
+    scale_color_manual(values = c("#F8766D", "darkgrey", "grey"))
+ggsave(device = "pdf", "pics/slowdown_m6Avsnonm6A_mESC.pdf")
+```
+
+\FloatBarrier
+
+# m6A degradation effect in frame
+
+```{r}
+m6A_glori_cds_gr$log2FC_stm_6h <- da_stm_6h$log2FC[match(m6A_glori_cds_gr$Gene_ID,
+                                                        da_stm_6h$gene_id)]
+m6A_glori_cds_gr$log2FC_stm_9h <- da_stm_9h$log2FC[match(m6A_glori_cds_gr$Gene_ID,
+                                                        da_stm_9h$gene_id)]
+m6A_glori_cds_gr$log2FC_stm_24h <- da_stm_24h$log2FC[match(m6A_glori_cds_gr$Gene_ID,
+                                                        da_stm_24h$gene_id)]
+
+my_comparisons <- list( c("1", "2"), 
+                        c("2", "3"),
+                        c("1", "3"))
+ggplot(as.data.frame(m6A_glori_cds_gr), aes(y = log2FC_stm_6h, x = position_in_frame)) +
+    geom_boxplot(outlier.shape = NA) +
+    coord_cartesian(ylim = c(-1.5,2.2)) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "The LFC upon STM for m6A in different frame") + 
+    stat_compare_means(comparisons = my_comparisons, label.y = c(1.3,1.4,1.5),
+                       label = "p.signif", vjust = 0.7, method = "wilcox.test")
+```
+
+```{r}
+## find out the codon based on the sequence and the position in frame
+m6A_glori_cds_gr <- as.data.frame(m6A_glori_cds_gr) %>% mutate(
+    codon = case_when(position_in_frame == "1" ~ substr(kmer5, 3,5), 
+                      position_in_frame == "2" ~ substr(kmer5, 2,4), 
+                      position_in_frame == "3" ~ substr(kmer5, 1,3))
+    ) %>% group_by(codon) %>% mutate(freq = n())
+m6A_glori_cds_dracn <- m6A_glori_cds_gr[grep(DRACN, m6A_glori_cds_gr$kmer5),]
+p1 <- ggplot(m6A_glori_cds_dracn, aes(x = reorder(codon, -freq), fill = position_in_frame)) + 
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL) + 
+    geom_text(aes(label = ..count..), stat = "count") + 
+    labs(title = "STM 6h vs codon")
+
+p2 <- ggplot(m6A_glori_cds_dracn, aes(x = reorder(codon, -freq), y = log2FC_stm_6h, 
+                                      fill = position_in_frame)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(x = NULL)
+p1+p2
+```
+
+```{r}
+p1 <- ggplot(m6A_glori_cds_dracn, aes(x = reorder(codon, -freq), y = log2FC_stm_9h, 
+                                      fill = position_in_frame)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(x = NULL, title = "STM9h")
+p2 <- ggplot(m6A_glori_cds_dracn, aes(x = reorder(codon, -freq), y = log2FC_stm_24h, 
+                                      fill = position_in_frame)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(x = NULL, title = "STM24h")
+p1+p2
+```
+
+```{r}
+## number of m6A in frame for each gene
+number_m6A_frame <- m6A_glori_cds_gr %>% group_by(Gene_ID, position_in_frame) %>%
+    summarise(number = n(), .groups = "drop") %>% 
+    mutate(bin_frame = cut(number, breaks = c(0,3,6,9,Inf)))
+## number of CDS m6A sites for each gene 
+number_m6A_CDS <- m6A_glori_cds_gr %>% group_by(Gene_ID, location) %>%
+    summarise(number = n(), .groups = "drop") %>% 
+    mutate(bin_m6A = cut(number, breaks = c(0,3,6,9,12,Inf)))
+
+number_m6A_frame$bin_m6A_cds <- number_m6A_CDS$bin_m6A[match(number_m6A_frame$Gene_ID,
+                                                             number_m6A_CDS$Gene_ID)]
+number_m6A_frame$number_m6A_cds <- number_m6A_CDS$number[match(number_m6A_frame$Gene_ID,
+                                                             number_m6A_CDS$Gene_ID)]
+number_m6A_frame$log2FC_stm6h <- 
+    da_stm_6h$log2FC[match(number_m6A_frame$Gene_ID, da_stm_6h$gene_id)]
+number_m6A_frame$log2FC_stm9h <- 
+    da_stm_9h$log2FC[match(number_m6A_frame$Gene_ID, da_stm_9h$gene_id)]
+number_m6A_frame$log2FC_stm24h <- 
+    da_stm_24h$log2FC[match(number_m6A_frame$Gene_ID, da_stm_24h$gene_id)]
+
+ggplot(number_m6A_frame[number_m6A_frame$number_m6A_cds > 9,], 
+       aes(fill = position_in_frame, y = log2FC_stm6h, x = bin_frame)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-1.5,1.5)) + 
+    geom_hline(yintercept = 0, linetype = 2) + 
+    labs(title = "The genes with more than 9 m6A sites",
+         x = "Number of m6A sites in specific frame",
+         y = "log2FC upon STM 6h")
+```
+
+\FloatBarrier
+
+# Ribosome density profiling STM/M3 KO vs WT
+In this section, I adopt the method that I use to calculate the ribosome density to do the ribosome density 
+profiling. Here are the step for the ribosome density profiling:        
+1) Extract the ribo-seq 5'end signal        
+2) Normalized it to the total read count at CDS of corresponding gene, then divide the output by the 
+length of CDS of corresponding transcript.        
+3) Select sites which have signal in both STM/M3 KO and WT to do the ribosome density profiling.
+
+## STM vs WT in HEK  {.tabset}
+
+```{r}
+## calculate the length of CDS
+hg38_cds_len <- hg38[hg38$type == "CDS"] %>% as.data.frame(.) %>%
+    group_by(gene_id, transcript_id) %>% summarise(cds_len = sum(width), .groups = "drop") %>%
+    arrange(., -cds_len) %>% ungroup(.) %>% group_by(gene_id) %>%
+    filter(row_number() == 1)
+
+m6A_hek_GLORI$ID <- paste0(seqnames(m6A_hek_GLORI), ":", start(m6A_hek_GLORI), ",", 
+                           strand(m6A_hek_GLORI))
+m6A_hek_GLORI$reads_wt_cds_ribo <- ribo.df$wt_sum[match(m6A_hek_GLORI$Gene_ID, rownames(ribo.df))]
+m6A_hek_GLORI$reads_stm_cds_ribo <- ribo.df$stm_sum[match(m6A_hek_GLORI$Gene_ID, rownames(ribo.df))]
+m6A_hek_GLORI$cds_len <- hg38_cds_len$cds_len[match(m6A_hek_GLORI$Gene_ID, hg38_cds_len$gene_id)]
+## keep CDS m6A sites which have riboseq signal on the located gene
+m6A_hek_GLORI_cds_f <- m6A_hek_GLORI[m6A_hek_GLORI$location == "CDS"]
+thresh <- 30
+m6A_hek_GLORI_cds_f <- m6A_hek_GLORI_cds_f[m6A_hek_GLORI_cds_f$reads_wt_cds_ribo >thresh & 
+                                               m6A_hek_GLORI_cds_f$reads_stm_cds_ribo >thresh]
+m6A_hek_GLORI_cds_f$factor_wt <- m6A_hek_GLORI_cds_f$reads_wt_cds_ribo/m6A_hek_GLORI_cds_f$cds_len
+m6A_hek_GLORI_cds_f$factor_stm <- m6A_hek_GLORI_cds_f$reads_stm_cds_ribo/m6A_hek_GLORI_cds_f$cds_len
+
+# ## remove the sites which located on the gene without ribo signal
+# gr <- m6A_hek_GLORI_cds_f
+# ## normalization factor calculation
+# rle_p <- WT.MC.p
+# rle_n <- WT.MC.n
+# group_name = "WT"
+# window.size = 50
+
+ribo_density <- function(gr, rle_p, rle_n, window.size = 50, 
+                         factor_name = "factor_wt", low_count_threshold = 30){
+    ## open a given window for extracting riboseq signal around given sites
+    gr <- gr+window.size
+    ## split the sites based on the strand
+    gr_n <- gr[strand(gr) == "-"]
+    gr_p <- gr[strand(gr) == "+"]
+
+    ## get the truncation signals
+    cover_p <- as.matrix(rle_p[gr_p])
+    cover_n <- as.matrix(rle_n[gr_n] ) %>% .[,ncol(.):1]
+    cover_p[is.na(cover_p)] <- 0
+    cover_n[is.na(cover_n)] <- 0
+    rownames(cover_p) <- gr_p$ID
+    rownames(cover_n) <- gr_n$ID
+    
+    ## combine the signal on positive and negative strand
+    cover <- rbind(cover_p, cover_n)
+    ## remove the sites which have no ribosome signal
+    cover <- cover[rowSums(cover) > low_count_threshold,]
+    ## remove the sites which have a low coverage
+    norm_factor <- mcols(gr)[,colnames(mcols(gr)) %in% c("ID", factor_name)]
+    ## order the normalization factor by the rowname of cover
+    norm_factor <- norm_factor[match(rownames(cover), norm_factor$ID),]
+    df <- as.data.frame(cover/norm_factor[,grep(factor_name, colnames(norm_factor))])
+    return(df)
+}
+```
+
+### m6A
+
+```{r}
+window.size <- 50
+low_count_threshold <- 30
+## ribosome density calculation
+tmp_wt <- ribo_density(m6A_hek_GLORI_cds_f[m6A_hek_GLORI_cds_f$m6A_lvl_avg >0.3], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(m6A_hek_GLORI_cds_f[m6A_hek_GLORI_cds_f$m6A_lvl_avg >0.3], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+
+rbind(df_wt, df_stm) %>% 
+  ggplot(., aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Riboseq signal around GLORI m6A sites (stoi >0.3)")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### non-m6A DRACH
+
+```{r}
+## read count in riboseq
+nonm6A_cds_ff$ID <- paste0(seqnames(nonm6A_cds_ff), ":", start(nonm6A_cds_ff), ",", 
+                           strand(nonm6A_cds_ff))
+nonm6A_cds_ff$reads_wt_cds_ribo <- ribo.df$wt_sum[match(nonm6A_cds_ff$Gene_ID, rownames(ribo.df))]
+nonm6A_cds_ff$reads_stm_cds_ribo <- ribo.df$stm_sum[match(nonm6A_cds_ff$Gene_ID, rownames(ribo.df))]
+nonm6A_cds_ff$cds_len <- hg38_cds_len$cds_len[match(nonm6A_cds_ff$Gene_ID, hg38_cds_len$gene_id)]
+## keep CDS m6A sites which have riboseq signal on the located gene
+nonm6A_cds_fff <- nonm6A_cds_ff[nonm6A_cds_ff$location == "CDS"]
+nonm6A_cds_fff <- nonm6A_cds_fff-50
+thresh <- 30
+nonm6A_cds_fff <- nonm6A_cds_fff[nonm6A_cds_fff$reads_wt_cds_ribo >thresh & 
+                                               nonm6A_cds_fff$reads_stm_cds_ribo >thresh]
+nonm6A_cds_fff$factor_wt <- nonm6A_cds_fff$reads_wt_cds_ribo/nonm6A_cds_fff$cds_len
+nonm6A_cds_fff$factor_stm <- nonm6A_cds_fff$reads_stm_cds_ribo/nonm6A_cds_fff$cds_len
+
+## ribosome density calculation
+tmp_wt <- ribo_density(nonm6A_cds_fff, WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(nonm6A_cds_fff, STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+rbind(df_wt, df_stm) %>% 
+  ggplot(., aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Riboseq signal around non-m6A DRACN sites")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### m6A in frame 1 (stoi > 0.3)
+
+```{r}
+## calculate the position in frame for cds m6A sites
+m6A_hek_GLORI_cds_f$position_in_frame <- (m6A_hek_GLORI_cds_f$dist_to_start_co+1)%%3
+m6A_hek_GLORI_cds_f$position_in_frame[m6A_hek_GLORI_cds_f$position_in_frame == 0] <- 3
+m6A_hek_GLORI_cds_f$position_in_frame <- as.character(m6A_hek_GLORI_cds_f$position_in_frame)
+
+m6A_hek_GLORI_cds_ff <- m6A_hek_GLORI_cds_f[m6A_hek_GLORI_cds_f$m6A_lvl_avg > 0.3]
+
+## ribosome density calculation
+tmp_wt <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "1")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "1")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+# write.xlsx(as.data.frame(rbind(df_wt, df_stm)), "Ribosome density frame 1.xlsx", row.names = F)
+df_frame1 <- rbind(df_wt, df_stm)
+ggplot(df_frame1, aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Riboseq signal around GLORI m6A sites (frame 1 stoi >0.3)")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### m6A in frame 2 (stoi > 0.3)
+
+```{r}
+## ribosome density calculation
+tmp_wt <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "2")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "2")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+# write.xlsx(as.data.frame(rbind(df_wt, df_stm)), "Ribosome density frame 2.xlsx", row.names = F)
+df_frame2 <- rbind(df_wt, df_stm)
+ggplot(df_frame2, aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Riboseq signal around GLORI m6A sites (frame 2 stoi >0.3)")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### m6A in frame 3 (stoi > 0.3)
+
+```{r}
+## ribosome density calculation
+tmp_wt <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "3")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(m6A_hek_GLORI_cds_ff[which(m6A_hek_GLORI_cds_ff$position_in_frame == "3")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+write.xlsx(as.data.frame(rbind(df_wt, df_stm)), "Ribosome density frame 3.xlsx", row.names = F)
+df_frame3 <- rbind(df_wt, df_stm) 
+ggplot(df_frame3, aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("Riboseq signal around GLORI m6A sites (frame 3 stoi >0.3)")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### Scatter for -30:0 position
+
+```{r}
+## frame 1
+df_frame1_wt <- df_frame1[df_frame1$Group == "WT",]
+df_frame1_stm <- df_frame1[df_frame1$Group == "STM",]
+df_frame1_wt$signal_stm <- df_frame1_stm$Signal[match(df_frame1_wt$Position,
+                                                      df_frame1_stm$Position)]
+df_frame1_wt$dif <- df_frame1_wt$Signal-df_frame1_wt$signal_stm
+df_frame1_wt$Position2 <- df_frame1_wt$Position
+df_frame1_wt$Position2[c(1:33,37:101)] <- NA
+df_frame1_wt$group <- "Frame 1"
+## frame 2
+df_frame2_wt <- df_frame2[df_frame2$Group == "WT",]
+df_frame2_stm <- df_frame2[df_frame2$Group == "STM",]
+df_frame2_wt$signal_stm <- df_frame2_stm$Signal[match(df_frame2_wt$Position,
+                                                      df_frame2_stm$Position)]
+df_frame2_wt$dif <- df_frame2_wt$Signal-df_frame2_wt$signal_stm
+df_frame2_wt$Position2 <- df_frame2_wt$Position
+df_frame2_wt$Position2[c(1:33,37:101)] <- NA
+df_frame2_wt$group <- "Frame 2"
+## frame 3
+df_frame3_wt <- df_frame3[df_frame3$Group == "WT",]
+df_frame3_stm <- df_frame3[df_frame3$Group == "STM",]
+df_frame3_wt$signal_stm <- df_frame3_stm$Signal[match(df_frame3_wt$Position,
+                                                      df_frame3_stm$Position)]
+df_frame3_wt$dif <- df_frame3_wt$Signal-df_frame3_wt$signal_stm
+df_frame3_wt$Position2 <- df_frame3_wt$Position
+df_frame3_wt$Position2[c(1:33,37:101)] <- NA
+df_frame3_wt$group <- "Frame 3"
+
+df <- rbind(df_frame1_wt, df_frame2_wt, df_frame3_wt)
+df$log2FC <- log2(df$Signal/df$signal_stm)
+ggplot(df[df$Position >= -31 &df$Position <= 0,], 
+       aes(x = Position, y = dif, color = as.character(Position2)))  +
+    geom_point()  + 
+    labs(y = "Ribosome density difference between WT and STM2457",
+         x = NULL, color = "Position") + 
+    facet_wrap(~group) +
+    coord_cartesian(ylim = c(-0.6,1.5)) + 
+    scale_x_continuous(name = c(-31,-30,-16,-15,0), breaks = c(-31,-30,-16,-15,0))
+```
+
+### non-m6A DRACN in frame 1
+
+```{r}
+## ribosome density calculation
+tmp_wt <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "1")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "1")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+rbind(df_wt, df_stm) %>% 
+  ggplot(., aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("non-m6A DRACN frame 1")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### non-m6A DRACN in frame 2
+
+```{r}
+## ribosome density calculation
+tmp_wt <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "2")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "2")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+rbind(df_wt, df_stm) %>% 
+  ggplot(., aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("non-m6A DRACN frame 2")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+### non-m6A DRACN in frame 3
+
+```{r}
+## ribosome density calculation
+tmp_wt <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "3")], 
+                       WT.MC.p, WT.MC.n, window.size = window.size, 
+                         factor_name = "factor_wt", low_count_threshold = low_count_threshold)
+tmp_stm <- ribo_density(nonm6A_cds_fff[which(nonm6A_cds_fff$position_in_frame == "3")], 
+                        STM.MC.p, STM.MC.n, window.size = window.size, 
+                         factor_name = "factor_stm", low_count_threshold = low_count_threshold)
+## keep the sites which have the proper coverage in both WT and STM riboseq
+inter <- intersect(rownames(tmp_wt), rownames(tmp_stm))
+tmp_wt <- tmp_wt[rownames(tmp_wt) %in% inter,]
+tmp_stm <- tmp_stm[rownames(tmp_stm) %in% inter,]
+
+## make df for plotting
+df_wt <- data.frame(Signal = colSums(tmp_wt)/nrow(tmp_wt),
+                    Position = -window.size:window.size,
+                    Group = "WT")
+df_stm <- data.frame(Signal = colSums(tmp_stm)/nrow(tmp_stm),
+                     Position = -window.size:window.size,
+                     Group = "STM")
+
+rbind(df_wt, df_stm) %>% 
+  ggplot(., aes(x = Position, y = Signal, group = Group, color = Group)) + 
+  geom_line() +  
+  ylab("Normalizaed 5'end signal from Riboseq") + 
+  scale_x_continuous(breaks = c(-50,-40,-30,-20, -16,-10,0,10,20,30,40,50),
+        labels = c(-50,-40,-30,-20, -16, -10,"A",10,20,30,40,50)) + 
+  geom_vline(xintercept = 0, linetype = 2, size = 1) +
+  ggtitle(paste0("non-m6A DRACN frame 3")) + 
+  theme(legend.position = "top") + 
+      scale_color_brewer(palette = "Set1") + 
+      scale_fill_brewer(palette = "Set1")
+```
+
+## {-}
+
+\FloatBarrier
+
+# GO enrichment for the transcripts with a lot of GGACN
+
+## Human
+
+```{r eval=FALSE, include=T}
+## keep one transcript for each gene
+hg38_trans <- hg38[hg38$type == "transcript"]
+hg38_exon_len <- hg38[hg38$type == "CDS"] %>% as.data.frame(.) %>% group_by(transcript_id) %>%
+    summarise(trans_len = sum(width), .groups = "drop")
+hg38_trans$trans_len <- hg38_exon_len$trans_len[match(hg38_trans$transcript_id, 
+                                                      hg38_exon_len$transcript_id)]
+hg38_trans <- hg38_trans[order(hg38_trans$level, hg38_trans$transcript_support_level,
+                               -hg38_trans$trans_len)]
+hg38_trans <- hg38_trans %>% as.data.frame(.) %>% group_by(gene_id) %>%
+    filter(row_number() == 1)
+hg38_all <- hg38[hg38$transcript_id %in% hg38_trans$transcript_id]
+hg38_all <- hg38_all[seqnames(hg38_all) %in% standardChromosomes(hg38_all)]
+
+## keep the CDS for the longest transcript for each gene
+hg38_cds <- hg38[hg38$type == "CDS" & hg38$transcript_id %in% hg38_trans$transcript_id]
+hg38_cds <- hg38_cds[seqnames(hg38_cds) %in% standardChromosomes(hg38_cds)]
+hg38_cds$trans_len <- hg38_exon_len$trans_len[match(hg38_cds$transcript_id, 
+                                                      hg38_exon_len$transcript_id)]
+
+## get the single nucleotide coordinates from annotated CDS
+hg38_cds_1nt <- IRanges::reduce(hg38_cds)
+## split the exon into 1 nt
+hg38_cds_1nt <- GenomicRanges::tile(hg38_cds_1nt, width = 1) %>% unlist(.) 
+
+hg38_cds_1nt$kmer5 <- getSeq(Hsapiens, hg38_cds_1nt+2) %>% suppressWarnings()
+hg38_cds_1nt_drach <- hg38_cds_1nt[grep(DRACN, hg38_cds_1nt$kmer5)]
+
+## distance to SS
+hg38_cds_1nt_drach <- metaGeneProfile(hg38_cds_1nt_drach,
+    "~/Desktop/Data/Annotation/Human/gencode.v31.primary_assembly.annotation.gff3")[[1]]
+
+hg38_cds_1nt_drach <- dis_to_SS(hg38_cds_1nt_drach, hg38_all)
+hg38_cds_1nt_drach_f <- hg38_cds_1nt_drach[which(hg38_cds_1nt_drach$dis_SS >= 200)]
+hg38_cds_1nt_drach_f <- hg38_cds_1nt_drach_f[hg38_cds_1nt_drach_f$location == "CDS"]
+saveRDS(hg38_cds_1nt_drach_f,"rds/all_dracn_hg38.rds")
+```
+
+```{r}
+hg38_cds_1nt_drach_f <- readRDS("rds/all_dracn_hg38.rds")
+hg38_cds_1nt_drach_f <- hg38_cds_1nt_drach_f[grep("GGAC[ATCG]", hg38_cds_1nt_drach_f$kmer5)]
+## numnber of cds DRACN motif
+number_cds_dracn <- hg38_cds_1nt_drach_f %>% as.data.frame(.) %>% group_by(Gene_ID) %>%
+    summarise(number = n()) %>% arrange(., -number)
+## top 10% genes
+top_genes <- number_cds_dracn$Gene_ID[number_cds_dracn >10] %>%
+    substr(., 1, 15)
+
+## universe 
+## biomart and clusterprofiler
+library(clusterProfiler)
+library(biomaRt)
+library(org.Hs.eg.db)
+mart <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl",
+                  host = "sep2019.archive.ensembl.org", path = "/biomart/martservice",
+                  archive = FALSE)
+## get entrez ID for GO enrichment analysis
+entre_top_genes <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+                     filters = 'ensembl_gene_id', 
+                     values = unique(top_genes), 
+                     mart = mart)
+## GO enrichment with clusterprofiler
+top_GO <- enrichGO(entre_top_genes$entrezgene_id,
+                  OrgDb = org.Hs.eg.db, 
+                  pvalueCutoff = 0.1, ont = "BP",
+                  readable=T)
+dotplot(top_GO, showCategory=30,font.size = 6) + 
+    ggtitle("Gene with more than 10 GGACN in CDS (hg38)") +
+  scale_y_discrete(labels=function(x) str_wrap(x, width=40))
+write.xlsx(as.data.frame(top_GO), "More than 10 GGACN HEK.xlsx")
+```
+
+## Mouse
+
+```{r eval=FALSE, include=T}
+## keep one transcript for each gene
+mm10_trans <- mm10[mm10$type == "transcript"]
+mm10_exon_len <- mm10[mm10$type == "CDS"] %>% as.data.frame(.) %>% group_by(transcript_id) %>%
+    summarise(trans_len = sum(width), .groups = "drop")
+mm10_trans$trans_len <- mm10_exon_len$trans_len[match(mm10_trans$transcript_id, 
+                                                      mm10_exon_len$transcript_id)]
+mm10_trans <- mm10_trans[order(mm10_trans$level, mm10_trans$transcript_support_level,
+                               -mm10_trans$trans_len)]
+mm10_trans <- mm10_trans %>% as.data.frame(.) %>% group_by(gene_id) %>%
+    filter(row_number() == 1)
+mm10_all <- mm10[mm10$transcript_id %in% mm10_trans$transcript_id]
+mm10_all <- mm10_all[seqnames(mm10_all) %in% standardChromosomes(mm10_all)]
+
+## keep the CDS for the longest transcript for each gene
+mm10_cds <- mm10[mm10$type == "CDS" & mm10$transcript_id %in% mm10_trans$transcript_id]
+mm10_cds <- mm10_cds[seqnames(mm10_cds) %in% standardChromosomes(mm10_cds)]
+mm10_cds$trans_len <- mm10_exon_len$trans_len[match(mm10_cds$transcript_id, 
+                                                      mm10_exon_len$transcript_id)]
+
+## get the single nucleotide coordinates from annotated CDS
+mm10_cds_1nt <- IRanges::reduce(mm10_cds)
+## split the exon into 1 nt
+mm10_cds_1nt <- GenomicRanges::tile(mm10_cds_1nt, width = 1) %>% unlist(.) 
+
+mm10_cds_1nt$kmer5 <- getSeq(Mmusculus, mm10_cds_1nt+2) %>% suppressWarnings()
+mm10_cds_1nt_drach <- mm10_cds_1nt[grep(DRACN, mm10_cds_1nt$kmer5)]
+
+## distance to SS
+mm10_cds_1nt_drach <- metaGeneProfile(mm10_cds_1nt_drach,
+    "~/Desktop/Data/Annotation/Mouse/gencode.vM23.primary_assembly.annotation.gff3")[[1]]
+
+mm10_cds_1nt_drach <- dis_to_SS(mm10_cds_1nt_drach, mm10_all)
+mm10_cds_1nt_drach_f <- mm10_cds_1nt_drach[which(mm10_cds_1nt_drach$dis_SS >= 200)]
+mm10_cds_1nt_drach_f <- mm10_cds_1nt_drach_f[mm10_cds_1nt_drach_f$location == "CDS"]
+saveRDS(mm10_cds_1nt_drach_f,"rds/all_dracn_mm10.rds")
+```
+
+```{r}
+mm10_cds_1nt_drach_f <- readRDS("rds/all_dracn_mm10.rds")
+mm10_cds_1nt_drach_f <- mm10_cds_1nt_drach_f[grep("GGAC[ATCG]", mm10_cds_1nt_drach_f$kmer5)]
+## numnber of cds DRACN motif
+number_cds_dracn <- mm10_cds_1nt_drach_f %>% as.data.frame(.) %>% group_by(Gene_ID) %>%
+    summarise(number = n()) %>% arrange(., -number)
+## top 10% genes
+top_genes_mESC <- number_cds_dracn$Gene_ID[number_cds_dracn >10] %>%
+    substr(., 1, 18)
+
+## biomart and clusterprofiler
+library(org.Mm.eg.db)
+mart_mESC <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "mmusculus_gene_ensembl",
+                  host = "sep2019.archive.ensembl.org", path = "/biomart/martservice",
+                  archive = FALSE)
+## get entrez ID for GO enrichment analysis
+entre_top_genes_mESC <- getBM(attributes=c('entrezgene_id','ensembl_gene_id', 'external_gene_name'), 
+                     filters = 'ensembl_gene_id', 
+                     values = unique(top_genes_mESC), 
+                     mart = mart_mESC)
+## GO enrichment with clusterprofiler
+top_GO <- enrichGO(entre_top_genes_mESC$entrezgene_id,
+                  OrgDb = org.Mm.eg.db, 
+                  pvalueCutoff = 0.1, ont = "BP",
+                  readable=T)
+dotplot(top_GO, showCategory=30,font.size = 6) + 
+    ggtitle("Gene with more than 10 GGACN in CDS (mm10)") +
+  scale_y_discrete(labels=function(x) str_wrap(x, width=40))
+write.xlsx(as.data.frame(top_GO), "More than 10 GGACN mm10.xlsx")
+```
+
+\FloatBarrier
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+

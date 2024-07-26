@@ -1,0 +1,463 @@
+---
+title: "P-body analysis"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Buchmann Institute for Molecular Life Sciences
+      affiliation-url: https://www.bmls.de/
+title-block-banner: true
+# title-block-banner: "red"
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+execute:
+  echo: false
+  error: false
+  warning: false
+  crop: false
+---
+
+```{r, message=FALSE, warning=FALSE}
+## library loading
+library(ggplot2)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(dplyr)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(bookdown)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(kableExtra)
+library(ComplexHeatmap)
+library(tidyverse)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/miCLIPs/m6A_deposition_degradation_scripts/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#E41A1C"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+
+## set theme skin
+font_szie <- 9
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black"),
+      axis.ticks.y = element_line(color = "black")))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = 1))
+update_geom_defaults("hline",   list(color = "#993404", size = 1))
+update_geom_defaults("abline",   list(color = "#993404", size = 1))
+
+## filtering parameters
+pvalue <- 0.05
+basemean <- 10
+```
+
+# Introduction
+In this report, I will analysis the P-body data from Peter.
+
+---
+
+# Emetine
+
+## QC
+
+:::panel-tabset
+
+## Number of dot
+
+```{r}
+path.pbody.emetine <- 
+    "~/Desktop/Data/Julian_lab/Peter/P_body/2024-07-22_OperaPhenix_PB-quantification/2024-03-29_STM-Eme-Ars/"
+file.emetine <- list.files(path.pbody.emetine)
+
+p.body_emetine <- read.table(paste0(path.pbody.emetine, file.emetine[[1]]), skip = 9,
+                             header = T, sep = "\t")
+ggplot(p.body_emetine, aes(x = Compound)) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL)
+```
+
+## Correlation between intensity and number
+
+```{r}
+sum_p_body <- p.body_emetine %>% group_by(Compound) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              .groups = "drop")
+ggplot(sum_p_body, aes(x = Intensity_mean, y = number_spot_mean)) + 
+    geom_point() + 
+    stat_cor() + 
+    geom_smooth(method = "lm") + 
+    ggrepel::geom_label_repel(aes(label = Compound))
+```
+
+:::
+
+## Barplots results
+
+:::panel-tabset
+
+## Number of spots
+
+```{r}
+sum_p_body_well <- p.body_emetine %>% group_by(Compound, Row, Column) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              number_per_Area_mean = mean(All.Cells...Number.of.Spots.per.Area.of.Cell),
+              .groups = "drop")
+df_pbody <- sum_p_body_well %>% group_by(Compound) %>%
+    summarise(data_number = sum(data_number),
+              Intensity_Mean = mean(Intensity_mean),
+              Intensity_sd = sd(Intensity_mean),
+              number_spot_Mean = mean(number_spot_mean),
+              number_spot_sd = sd(number_spot_mean),
+              number_per_Area_Mean = mean(number_per_Area_mean),
+              number_per_Area_sd = sd(number_per_Area_mean))
+
+df_pbody$Compound <- factor(df_pbody$Compound, 
+                                   levels = c("DMSO", "STM2457 6h", "STM2457 24h",
+                                                          "Emetine", "Arsenite"))
+
+sum_p_body_well$Compound <- factor(sum_p_body_well$Compound, 
+                                   levels = c("DMSO", "STM2457 6h", "STM2457 24h",
+                                                          "Emetine", "Arsenite"))
+
+my_comparisons <- list(c("DMSO", "STM2457 6h"),
+                       c("DMSO", "STM2457 24h"),
+                       c("DMSO", "Emetine"),
+                       c("DMSO", "Arsenite"))
+
+ggplot(sum_p_body_well, aes(x = Compound, y = number_spot_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_spot_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_spot_Mean,
+                                ymin = number_spot_Mean-number_spot_sd, 
+                                ymax=number_spot_Mean+number_spot_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_spot_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Number of P-bodies (Mean)", title = "Emetine")
+```
+
+## Intensity
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = Intensity_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = Intensity_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= Intensity_Mean,
+                                ymin = Intensity_Mean-Intensity_sd, 
+                                ymax=Intensity_Mean+Intensity_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$Intensity_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Intensity of P-bodies (Mean)", title = "Emetine")
+```
+
+## Number spot per area
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = number_per_Area_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_per_Area_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_per_Area_Mean,
+                                ymin = number_per_Area_Mean-number_per_Area_sd, 
+                                ymax=number_per_Area_Mean+number_per_Area_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_per_Area_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "All Cells Number of Spots per Area of Cell (Mean)", title = "Emetine")
+```
+
+:::
+
+# DF2 25.04
+
+## QC
+
+:::panel-tabset
+
+## Number of dots
+
+```{r}
+path.pbody.df2 <- 
+    "~/Desktop/Data/Julian_lab/Peter/P_body/2024-07-22_OperaPhenix_PB-quantification/2024-04-25_only-DF2/"
+file.df2 <- list.files(path.pbody.df2)
+
+p.body_df2 <- read.table(paste0(path.pbody.df2, file.df2[[1]]), skip = 9,
+                             header = T, sep = "\t")
+ggplot(p.body_df2, aes(x = Compound)) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL)
+```
+
+## Correlation between intensity and number
+
+```{r}
+sum_p_body <- p.body_df2 %>% group_by(Compound) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              .groups = "drop")
+ggplot(sum_p_body, aes(x = Intensity_mean, y = number_spot_mean)) + 
+    geom_point() + 
+    stat_cor() + 
+    geom_smooth(method = "lm") + 
+    ggrepel::geom_label_repel(aes(label = Compound))
+```
+
+:::
+
+## Barplots results
+
+:::panel-tabset
+
+## Number of spots
+
+```{r}
+sum_p_body_well <- p.body_df2 %>% group_by(Compound, Row, Column) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              number_per_Area_mean = mean(All.Cells...Number.of.Spots.per.Area.of.Cell),
+              .groups = "drop")
+df_pbody <- sum_p_body_well %>% group_by(Compound) %>%
+    summarise(data_number = sum(data_number),
+              Intensity_Mean = mean(Intensity_mean),
+              Intensity_sd = sd(Intensity_mean),
+              number_spot_Mean = mean(number_spot_mean),
+              number_spot_sd = sd(number_spot_mean),
+              number_per_Area_Mean = mean(number_per_Area_mean),
+              number_per_Area_sd = sd(number_per_Area_mean))
+
+my_comparisons <- list(c("siYTHDF2_DMSO", "siYTHDF2_STM2457"),
+                       c("siC_DMSO", "siC_STM2457"),
+                       c("siC_DMSO", "siYTHDF2_DMSO"))
+
+ggplot(sum_p_body_well, aes(x = Compound, y = number_spot_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_spot_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_spot_Mean,
+                                ymin = number_spot_Mean-number_spot_sd, 
+                                ymax=number_spot_Mean+number_spot_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_spot_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Number of P-bodies (Mean)",
+         title = "DF2 25.04")
+```
+
+## Intensity
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = Intensity_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = Intensity_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= Intensity_Mean,
+                                ymin = Intensity_Mean-Intensity_sd, 
+                                ymax=Intensity_Mean+Intensity_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$Intensity_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Intensity of P-bodies (Mean)",
+         title = "DF2 25.04")
+```
+
+## Number spot per area
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = number_per_Area_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_per_Area_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_per_Area_Mean,
+                                ymin = number_per_Area_Mean-number_per_Area_sd, 
+                                ymax=number_per_Area_Mean+number_per_Area_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_per_Area_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "All Cells Number of Spots per Area of Cell (Mean)",
+         title = "DF2 25.04")
+```
+
+:::
+
+# DF2 06.05
+
+## QC
+
+:::panel-tabset
+
+## Number of dots
+
+```{r}
+path.pbody.df2 <- 
+    "~/Desktop/Data/Julian_lab/Peter/P_body/2024-07-22_OperaPhenix_PB-quantification/2024-05-06_only-DF2/"
+file.df2 <- list.files(path.pbody.df2)
+
+p.body_df2 <- read.table(paste0(path.pbody.df2, file.df2[[1]]), skip = 9,
+                             header = T, sep = "\t")
+ggplot(p.body_df2, aes(x = Compound)) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(x = NULL)
+```
+
+## Correlation between intensity and number
+
+```{r}
+sum_p_body <- p.body_df2 %>% group_by(Compound) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              .groups = "drop")
+ggplot(sum_p_body, aes(x = Intensity_mean, y = number_spot_mean)) + 
+    geom_point() + 
+    stat_cor() + 
+    geom_smooth(method = "lm") + 
+    ggrepel::geom_label_repel(aes(label = Compound))
+```
+
+:::
+
+## Barplots results
+
+:::panel-tabset
+
+## Number of spots
+
+```{r}
+sum_p_body_well <- p.body_df2 %>% group_by(Compound, Row, Column) %>%
+    summarise(data_number = n(), 
+              Intensity_mean = mean(All.Cells...Relative.Spot.Intensity),
+              number_spot_mean = mean(All.Cells...Number.of.Spots),
+              number_per_Area_mean = mean(All.Cells...Number.of.Spots.per.Area.of.Cell),
+              .groups = "drop")
+df_pbody <- sum_p_body_well %>% group_by(Compound) %>%
+    summarise(data_number = sum(data_number),
+              Intensity_Mean = mean(Intensity_mean),
+              Intensity_sd = sd(Intensity_mean),
+              number_spot_Mean = mean(number_spot_mean),
+              number_spot_sd = sd(number_spot_mean),
+              number_per_Area_Mean = mean(number_per_Area_mean),
+              number_per_Area_sd = sd(number_per_Area_mean))
+
+my_comparisons <- list(c("siDF2_DMSO", "siDF2_STM"),
+                       c("siC_DMSO", "siC_STM"),
+                       c("siC_DMSO", "siDF2_DMSO"))
+
+ggplot(sum_p_body_well, aes(x = Compound, y = number_spot_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_spot_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_spot_Mean,
+                                ymin = number_spot_Mean-number_spot_sd, 
+                                ymax=number_spot_Mean+number_spot_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_spot_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Number of P-bodies (Mean)",
+         title = "DF2 06.05")
+```
+
+## Intensity
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = Intensity_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = Intensity_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= Intensity_Mean,
+                                ymin = Intensity_Mean-Intensity_sd, 
+                                ymax=Intensity_Mean+Intensity_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$Intensity_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "Intensity of P-bodies (Mean)",
+         title = "DF2 06.05")
+```
+
+## Number spot per area
+
+```{r}
+ggplot(sum_p_body_well, aes(x = Compound, y = number_per_Area_mean))  + 
+    geom_col(data = df_pbody, aes(x = Compound, y = number_per_Area_Mean))  + 
+    geom_errorbar(data = df_pbody, 
+                  mapping = aes(x = Compound, y= number_per_Area_Mean,
+                                ymin = number_per_Area_Mean-number_per_Area_sd, 
+                                ymax=number_per_Area_Mean+number_per_Area_sd), 
+                                width=0.4, alpha=0.9) + 
+    geom_jitter() +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test",label = "p.signif")  +
+    geom_hline(yintercept = df_pbody$number_per_Area_Mean[df_pbody$Compound == "siC_DMSO"],
+               linetype = 2) +
+    labs(x = NULL, y = "All Cells Number of Spots per Area of Cell (Mean)",
+         title = "DF2 06.05")
+```
+
+:::
