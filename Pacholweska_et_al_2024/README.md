@@ -18,4 +18,4 @@ The source code can be found [here](https://github.com/ZarnackGroup/go_long2023/
 * The iCLIP analysis was performed with the *BindingSiteFinder* R package ([GitHub](https://github.com/ZarnackGroup/BindingSiteFinder), [Bioconductor](https://www.bioconductor.org/packages/release/bioc/html/BindingSiteFinder.html)).
 
 ## Reference
-Pacholewska A*, Lienhard M*, Brüggemann M*, Hänel H, Bilalli L, Königs A, Heß F, Becker K, Köhrer K, Kaiser J, Gohlke H, Gattermann N, Hallek M, Herling CD, König J, Grimm C, Herwig R#, Zarnack K#, Schweiger MR#. Long-read transcriptome sequencing of CLL and MDS patients uncovers molecular effects of SF3B1 mutations. Genome Res. 2024 Nov 20;34(11):1832-1848. https://doi.org/10.1101/gr.279327.124
+[1] Pacholewska A*, Lienhard M*, Brüggemann M*, Hänel H, Bilalli L, Königs A, Heß F, Becker K, Köhrer K, Kaiser J, Gohlke H, Gattermann N, Hallek M, Herling CD, König J, Grimm C, Herwig R#, Zarnack K#, Schweiger MR#. Long-read transcriptome sequencing of CLL and MDS patients uncovers molecular effects of SF3B1 mutations. Genome Res. 2024 Nov 20;34(11):1832-1848. https://doi.org/10.1101/gr.279327.124
