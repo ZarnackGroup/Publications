@@ -9,8 +9,8 @@ Aberrant RNA splicing is a hallmark of aggressive cancers. We show that oncogeni
 The source code can be found [hosted on a webpage here](https://felixhaidle.github.io/prieto_garcia_et_al_2026/), or alternatively in a GitHub repository [here](https://github.com/felixhaidle/prieto_garcia_et_al_2026) and is split into three parts:
 
 * [RNA-seq MAJIQ Data Processing](https://felixhaidle.github.io/prieto_garcia_et_al_2026/rnaseq_raw_data_processing.html)
-* [Junction count based Alternative Splicing Analysis in TCGA LIHC Cohort](https://felixhaidle.github.io/prieto_garcia_et_al_2026/comparing_rnaseq_and_tcga_results.html); Fig. 2C, S2B
-* [Read Coverage based Alternative Splicing Analysis in TCGA LIHC Cohort](https://felixhaidle.github.io/prieto_garcia_et_al_2026/recount_paper.html); Fig. 1I, S1M
+* [Junction count based Alternative Splicing Analysis in TCGA LIHC Cohort](https://felixhaidle.github.io/prieto_garcia_et_al_2026/comparing_rnaseq_and_tcga_results.html) (Fig. 2C, S2B)
+* [Read Coverage based Alternative Splicing Analysis in TCGA LIHC Cohort](https://felixhaidle.github.io/prieto_garcia_et_al_2026/recount_paper.html) (Fig. 1I, S1M)
 
 ## Tools and packages
 
