@@ -1,4 +1,4 @@
-# Source code for "m6A sites in the coding region trigger translation-dependent mRNA decay"
+# Source code for "RepliCNN: High-resolution inference of the DNA replication program from strand-specific 3′ DNA end sequencing"
 
 ## Abstract
 
