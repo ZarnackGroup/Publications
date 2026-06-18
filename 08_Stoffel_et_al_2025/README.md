@@ -7,4 +7,4 @@ The entire RNA life cycle, spanning from transcription to decay, is intricately 
 The source code is deposited at https://github.com/Srimeenakshis/Stoffel_2025_RNA.
 
 ## Reference
-1. Stoffel NK, Sankaranarayanan S, Müntjes K, et al. Microbial iCLIP2: enhanced mapping of RNA-protein interaction by promoting protein and RNA stability. RNA. 2025;31(2):258-272. Published 2025 Jan 22. doi:10.1261/rna.080193.124.
+[1] Stoffel NK, Sankaranarayanan S, Müntjes K, et al. Microbial iCLIP2: enhanced mapping of RNA-protein interaction by promoting protein and RNA stability. RNA. 2025;31(2):258-272. Published 2025 Jan 22. doi:10.1261/rna.080193.124.
