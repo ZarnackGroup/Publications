@@ -1,0 +1,1278 @@
+---
+title: "03 Splicing speed and nuclear residence time"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Julius-Maximilians-Universität Würzburg
+      affiliation-url: https://www.uni-wuerzburg.de/
+title-block-banner: true
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+execute:
+  echo: false
+  error: false
+  warning: false
+editor: 
+  markdown: 
+    wrap: 100
+---
+
+
+```{r}
+#| echo: false
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggsignif)
+library(tidyplots)
+library(gt)
+library(limma)
+library(minpack.lm)
+library(tibble)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/homemade_functions/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+## To make sure the number is in 150000000 format instead of 1.5e+08
+options(scipen = 999)
+
+## set theme skin
+font_szie <- 6
+linesize <- 0.5
+lw <- 0.5
+
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw)))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+update_geom_defaults("abline",   list(color = "#993404", size = linesize))
+
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+basemean <- 10
+pvalue <- 0.05
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")
+DRACN <- "[GAT][GA]AC[ATCG]"
+
+fix_panel_size <- function(p, panel_width = 3, panel_height = 3, unit = "cm") {
+  gt <- ggplotGrob(p)
+  pp <- gt$layout[gt$layout$name == "panel", ]
+
+  gt$widths[pp$l]  <- grid::unit(panel_width, unit)
+  gt$heights[pp$t] <- grid::unit(panel_height, unit)
+
+  gt
+}
+
+panel_width <- 3
+panel_height <- 3
+```
+
+# Introduction
+
+Here collects code for the estimation of splicing speed and nuclear residence time, as well as 
+related downstream analyses.
+
+----------------------------------------------------------------------------------------------------
+
+# Data processing
+
+All the TTseq data are mapped by Anke, and then I used bam file to run IRFinder v2.0 to quatify the
+intron retention ratio and then use this ratio to calculate the intron half lives.
+
+# Model to estimate the intron half lives
+
+Since now we have three time point, I developed a new model to do so. Different from the pulse and
+chase experiment from SLAM-seq, the intron retention ratio in TTseq includes the newly transcribed
+transcript and old transcript. Therefore the intron retention ratio represents an average splicing
+status for all the transcripts that generated within the 4sU labeled time.
+
+For an individual RNA molecule, we assume that intron removal follows first-order kinetics. Let
+(U(t)) denote the probability that an intron remains unspliced when the RNA molecule has age (t).
+The change in (U(t)) is described by
+
+$$\frac{dU(t)}{dt}=-kU(t)$$
+
+where (k) is the intron-removal rate constant in units of *min*.
+
+Assuming that the intron is initially unspliced,
+
+$$U(0)=1$$
+
+the solution is
+
+$$U(t)=e^{-kt}$$
+
+Thus, for a synchronized population of RNA molecules that all have the same molecular age (t), the
+fraction remaining unspliced decreases exponentially.
+
+However, cumulative TT-seq labeling does not produce a synchronized RNA population. During a
+labeling period of duration (T), new RNA molecules are continuously synthesized. Therefore, a sample
+collected after (T) minutes contains labeled RNAs with molecular ages ranging approximately from 0
+to (T) minutes.
+
+For example, a 60-minute labeling sample contains both:
+
+relatively old RNAs synthesized near the beginning of the labeling period, and very young RNAs
+synthesized shortly before sample collection.
+
+Consequently, the observed intron-retention ratio is the average probability of remaining unspliced
+across all RNA ages present in the labeling interval.
+
+Assuming a constant transcription rate, RNA ages are approximately uniformly distributed between 0
+and (T). The expected intron-retention ratio is therefore
+
+$$IR(T)=\frac{1}{T}\int_0^T e^{-kt}dt$$
+
+Evaluating the integral gives
+
+$$IR(T)=\frac{1-e^{-kT}}{kT}$$
+
+The apparent intron-removal half-life is calculated from the fitted rate constant (k) as
+
+$$Half\ lives=\frac{\ln(2)}{k}$$
+
+This approach is conceptually related to kinetic models developed for progressive metabolic
+RNA-labeling experiments, in which newly synthesized RNA is continuously generated while unspliced
+RNA is removed through first-order splicing kinetics
+
+## Model assumptions
+
+The simplified model assumes that:
+
+- RNA synthesis is approximately constant during the labeling period.\
+
+- Each newly synthesized intron is initially unspliced.
+
+- Intron removal follows a single first-order process.\
+
+- RNA degradation during the labeling interval is negligible relative to intron removal.\
+
+- The measured intron-retention ratio approximates the fraction of labeled RNA molecules that retain
+  the intron.\
+
+
+# Half lives calculation
+
+## Data loading
+
+```{r}
+## Data loading
+## IR_15
+## load 15mins
+path.irf <- "~/Desktop/Data/Julian_lab/TTseq_all/TT15min/irfinder_quant/"
+all_file <- list.files(path.irf)
+
+for (i in 1:3) {
+    t <- read.table(paste0(path.irf, all_file[[i]], "/IRFinder-IR-dir.txt"),
+               header = T)
+    n <- sub("imb_koenig_2024_15_01_", "", all_file[[i]]) %>%
+        sub(".cutadapt", "", .)
+    t$time_min <- 15
+    t$replicate <- sub(".*_", "", n)
+    
+    t$Intron_ID <- paste0(t$Chr,":", t$Start,"-", t$End, " ", t$Strand)
+    
+    if (i == 1) {
+        IR_15 <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+    } else {
+        tmp <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+        IR_15 <- rbind(IR_15, tmp)
+    }
+    
+}
+
+## IR_30
+path.irf <- "~/Desktop/Data/Julian_lab/TTseq_all/TT30min/irfinder_quant/"
+all_file <- list.files(path.irf)
+
+for (i in 1:3) {
+    t <- read.table(paste0(path.irf, all_file[[i]], "/IRFinder-IR-dir.txt"),
+               header = T)
+    n <- sub("imb_koenig_2025_04_01_", "", all_file[[i]]) %>%
+        sub(".cutadapt", "", .)
+    t$time_min <- 30
+    t$replicate <- sub(".*_", "", n)
+    
+    t$Intron_ID <- paste0(t$Chr,":", t$Start,"-", t$End, " ", t$Strand)
+    
+    if (i == 1) {
+        IR_30 <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+    } else {
+        tmp <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+        IR_30 <- rbind(IR_30, tmp)
+    }
+}
+
+## IR_60
+path.irf <- "~/Desktop/Data/Julian_lab/TTseq_all/TTseq_60mins/irfinder_quant/"
+all_file <- list.files(path.irf)
+
+for (i in 1:3) {
+    t <- read.table(paste0(path.irf, all_file[[i]], "/IRFinder-IR-dir.txt"),
+               header = T)
+    n <- sub("jmu_koenig_2026_03_01_", "", all_file[[i]]) %>%
+        sub(".cutadapt", "", .)
+    t$time_min <- 60
+    t$replicate <- sub(".*_", "", n)
+    
+    t$Intron_ID <- paste0(t$Chr,":", t$Start,"-", t$End, " ", t$Strand)
+    
+    if (i == 1) {
+        IR_60 <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+    } else {
+        tmp <- t[,c("Intron_ID", "time_min", "replicate", "IRratio", "IntronDepth")]
+        IR_60 <- rbind(IR_60, tmp)
+    }
+}
+```
+
+## Basic status
+
+::: panel-tabset
+
+## IR ratio distribution intronDepth \>= 5
+
+```{r}
+## merge data
+IR_all <- rbind(IR_15,IR_30,IR_60)
+## replace rep5 to rep4
+IR_all$replicate[IR_all$replicate == "rep5"] <- "rep4"
+## replace rep4 to rep2
+IR_all$replicate[IR_all$replicate == "rep4"] <- "rep2"
+
+p <- ggplot(IR_all[IR_all$IntronDepth >= 5,], 
+       aes(x = as.factor(time_min), y = IRratio, fill = replicate)) + 
+    geom_boxplot(outlier.shape = NA) 
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## ECDF sep intronDepth \>= 5
+
+```{r}
+IR_all$time_rep <- paste0(IR_all$time_min, "_", IR_all$replicate)
+p <- ggplot(IR_all[IR_all$IntronDepth >= 5,], 
+       aes(color = time_rep, x = IRratio)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction")
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## ECDF mean intronDepth \>= 5
+
+```{r}
+IR_all_f <- IR_all[IR_all$IntronDepth >= 5,]
+IR_all_sum <- IR_all_f %>%
+    group_by(time_min, Intron_ID) %>%
+    summarise(mean_IRratio = mean(IRratio, rm.na = T), .groups = "drop")
+
+p <- ggplot(IR_all_sum, 
+       aes(color = as.factor(time_min), x = mean_IRratio)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction")
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+df <- data.frame(Time = c("15", "30", "60"),
+                 Median_spliced_ratio = c(
+                     (1- median(IR_all_sum$mean_IRratio[IR_all_sum$time_min == 15])),
+                     (1- median(IR_all_sum$mean_IRratio[IR_all_sum$time_min == 30])),
+                     (1- median(IR_all_sum$mean_IRratio[IR_all_sum$time_min == 60]))))
+
+df
+```
+
+
+## Number intronDepth \>= 5
+
+```{r}
+p <- ggplot(IR_all_f, 
+       aes(x = as.factor(time_min), fill = replicate)) + 
+    geom_bar(position = "dodge") + 
+    geom_label(aes(label = ..count..), stat = "count", size = 0.7,
+               position = position_dodge(width = 0.9),
+               show.legend = F)
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+:::
+
+## Half lives estimation
+
+While I estimate the HLs, I take the **IntronDepth** into account as the weight of data point for
+the regression.
+
+```{r}
+## function to fit the half lives
+continuous_ir <- function(time_min, k) {
+
+  x <- k * time_min
+
+  ## when k*time is very small，use Taylor expansion to avoid the error
+  ifelse(
+    x < 1e-7,
+    1 - x / 2 + x^2 / 6,
+    -expm1(-x) / x
+  )
+}
+
+fit_one_intron <- function(
+    dat,
+    required_timepoints = c(15, 30, 60),
+    min_intron_depth = 5,
+    min_reps_per_time = 2,
+    min_half_life = 0.1,
+    max_half_life = 1000,
+    weight_method = c("sqrt", "linear", "none")
+) {
+
+  weight_method <- match.arg(weight_method)
+
+  
+  dat <- dat |>
+    dplyr::ungroup() |>
+    as.data.frame()
+  ## keep raw data
+  n_observations_raw <- nrow(dat)
+
+  ## make sure the data type is correct
+  dat <- dat |>
+    mutate(
+      time_min = as.numeric(time_min),
+      replicate = as.character(replicate),
+      IRratio = as.numeric(IRratio),
+      IntronDepth = as.numeric(IntronDepth)
+    )
+
+  ## deplete un-wantted data
+  dat_valid <- dat |>
+    filter(
+      is.finite(time_min),
+      is.finite(IRratio),
+      is.finite(IntronDepth),
+      !is.na(replicate),
+      time_min %in% required_timepoints,
+      IRratio >= 0,
+      IRratio <= 1,
+      IntronDepth >= 0
+    )
+
+  ## based on introndepth filtered out the un-reliable data points
+  dat_filtered <- dat_valid |>
+    filter(
+      IntronDepth >= min_intron_depth
+    )
+
+  n_filtered_low_depth <-
+    nrow(dat_valid) - nrow(dat_filtered)
+
+  n_observations_used <- nrow(dat_filtered)
+
+  ## count how many data points still left after filtering
+  reps_per_time <- dat_filtered |>
+  dplyr::distinct(
+    .data$time_min,
+    .data$replicate
+  ) |>
+  dplyr::group_by(
+    .data$time_min
+  ) |>
+  dplyr::summarise(
+    n_replicates = dplyr::n_distinct(
+      .data$replicate
+    ),
+    .groups = "drop"
+  )
+
+  all_timepoints_present <- all(
+    required_timepoints %in% reps_per_time$time_min
+  )
+
+  min_reps_observed <- if (nrow(reps_per_time) > 0) {
+    min(reps_per_time$n_replicates)
+  } else {
+    0
+  }
+
+  ## if there is missing timepoint or insufficiency data point then do not do the regression
+  if (
+    !all_timepoints_present ||
+    min_reps_observed < min_reps_per_time
+  ) {
+
+    return(
+      tibble(
+        status = "insufficient_depth_or_replicates",
+        n_observations_raw = n_observations_raw,
+        n_observations_used = n_observations_used,
+        n_filtered_low_depth = n_filtered_low_depth,
+        min_reps_per_time = min_reps_observed,
+        median_intron_depth = ifelse(
+          n_observations_used > 0,
+          median(dat_filtered$IntronDepth),
+          NA_real_
+        ),
+        k_per_min = NA_real_,
+        half_life_min = NA_real_,
+        weighted_rmse = NA_real_,
+        weighted_r_squared = NA_real_,
+        boundary_fit = NA
+      )
+    )
+  }
+
+  ## weight intron depth
+  dat_filtered <- dat_filtered |>
+    mutate(
+      raw_weight = case_when(
+        weight_method == "sqrt" ~ sqrt(IntronDepth),
+        weight_method == "linear" ~ IntronDepth,
+        weight_method == "none" ~ 1
+      ),
+
+      ## normalization
+      fit_weight = raw_weight / mean(raw_weight)
+    )
+
+  ## set the boundary for half lives
+  lower_k <- log(2) / max_half_life
+  upper_k <- log(2) / min_half_life
+
+  lower_log_k <- log(lower_k)
+  upper_log_k <- log(upper_k)
+
+  ## fitting
+  fit <- try(
+    nlsLM(
+      IRratio ~ continuous_ir(
+        time_min,
+        exp(log_k)
+      ),
+      data = dat_filtered,
+
+      ## start with half-life = 15 min
+      start = list(
+        log_k = log(log(2) / 15)
+      ),
+
+      lower = c(
+        log_k = lower_log_k
+      ),
+
+      upper = c(
+        log_k = upper_log_k
+      ),
+
+      ## IntronDepth used as weigth to tell which data point is more reliable
+      weights = fit_weight,
+
+      control = nls.lm.control(
+        maxiter = 1000
+      )
+    ),
+    silent = TRUE
+  )
+
+  if (inherits(fit, "try-error")) {
+
+    return(
+      tibble(
+        status = "fit_failed",
+        n_observations_raw = n_observations_raw,
+        n_observations_used = n_observations_used,
+        n_filtered_low_depth = n_filtered_low_depth,
+        min_reps_per_time = min_reps_observed,
+        median_intron_depth =
+          median(dat_filtered$IntronDepth),
+        k_per_min = NA_real_,
+        half_life_min = NA_real_,
+        weighted_rmse = NA_real_,
+        weighted_r_squared = NA_real_,
+        boundary_fit = NA
+      )
+    )
+  }
+
+  ## get parameter log k
+  log_k <- coef(fit)[["log_k"]]
+  k <- exp(log_k)
+
+  half_life_min <- log(2) / k
+
+  ## calculate predicted value and residual
+  observed <- dat_filtered$IRratio
+  predicted <- predict(fit)
+  residuals <- observed - predicted
+  weights <- dat_filtered$fit_weight
+
+  ## Weighted RMSE
+  weighted_rmse <- sqrt(
+    sum(weights * residuals^2) /
+      sum(weights)
+  )
+
+  ## Weighted R-squared
+  weighted_mean <- sum(
+    weights * observed
+  ) / sum(weights)
+
+  weighted_rss <- sum(
+    weights * residuals^2
+  )
+
+  weighted_tss <- sum(
+    weights *
+      (observed - weighted_mean)^2
+  )
+
+  weighted_r_squared <- if (weighted_tss > 0) {
+    1 - weighted_rss / weighted_tss
+  } else {
+    NA_real_
+  }
+
+  ## fitting boundary
+  boundary_fit <-
+    abs(log_k - lower_log_k) < 0.02 ||
+    abs(log_k - upper_log_k) < 0.02
+
+  tibble(
+    status = "ok",
+    n_observations_raw = n_observations_raw,
+    n_observations_used = n_observations_used,
+    n_filtered_low_depth = n_filtered_low_depth,
+    min_reps_per_time = min_reps_observed,
+    median_intron_depth =
+      median(dat_filtered$IntronDepth),
+    min_intron_depth_used =
+      min(dat_filtered$IntronDepth),
+    max_intron_depth_used =
+      max(dat_filtered$IntronDepth),
+    k_per_min = unname(k),
+    half_life_min = unname(half_life_min),
+    weighted_rmse = weighted_rmse,
+    weighted_r_squared = weighted_r_squared,
+    boundary_fit = boundary_fit
+  )
+}
+```
+
+```{r}
+#| eval: false
+#| include: true
+min_intronDepth <- 5
+intron_half_lives <- IR_all |>
+  group_by(Intron_ID) |>
+  group_modify(
+    ~ fit_one_intron(
+      dat = .x,
+      min_intron_depth = min_intronDepth,
+      weight_method = "sqrt"
+    )
+  ) |>
+  ungroup() |>
+    as.data.frame(.)
+
+saveRDS(intron_half_lives, "rds/intron_half_lives_3_timepoint_weighted_3_reps.rds")
+
+intron_half_lives_f <- intron_half_lives[!is.na(intron_half_lives$half_life_min),]
+## make gr
+intron_half_lives_f$start <- getstr(intron_half_lives_f$Intron_ID, ":", 1, "-",1)
+intron_half_lives_f$end <- getstr(intron_half_lives_f$Intron_ID, "-", 1, " ",1)
+intron_half_lives_f$seqnames <- sub(":.*", "", intron_half_lives_f$Intron_ID)
+intron_half_lives_f$strand <- sub(".* ", "", intron_half_lives_f$Intron_ID)
+gr_intron_hl_3 <- makeGRangesFromDataFrame(intron_half_lives_f, keep.extra.columns = T)
+
+saveRDS(gr_intron_hl_3, "rds/gr_intron_HLs_3_timepoint_3_reps.rds")
+```
+
+
+```{r}
+## data loading
+gr_intron_hl_3 <- readRDS("rds/gr_intron_HLs_3_timepoint_3_reps.rds")
+## filtering
+gr_intron_hl_3 <- gr_intron_hl_3[gr_intron_hl_3$weighted_rmse <= 0.1]
+## remove the intron with upper limited HLs
+gr_intron_hl_3 <- gr_intron_hl_3[gr_intron_hl_3$half_life_min < max(gr_intron_hl_3$half_life_min)]
+
+## move 1nt dut to the 0based coordinate from IRFinder
+start(gr_intron_hl_3) <- start(gr_intron_hl_3)+1
+
+m6A_mature_f <- 
+    readRDS("../02 m6A deposition before splicing/rds/m6A_mature_f_with_chr_accessibility.rds")
+
+m6A_mature_f$test_start <- m6A_mature_f$exon_start
+
+m6A_mature_f$test_end <- m6A_mature_f$exon_end
+
+## start
+test_start <- data.frame(ID = m6A_mature_f$ID,
+                         chr = seqnames(m6A_mature_f),
+                         start = m6A_mature_f$test_start,
+                         end = m6A_mature_f$test_start,
+                         strand = strand(m6A_mature_f)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+test_start$hl_SS <- gr_intron_hl_3$half_life_min[
+    findOverlaps((test_start+10), gr_intron_hl_3, select = "first")]
+
+## end
+test_end <- data.frame(ID = m6A_mature_f$ID,
+                         chr = seqnames(m6A_mature_f),
+                         start = m6A_mature_f$test_end,
+                         end = m6A_mature_f$test_end,
+                         strand = strand(m6A_mature_f)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+## load splicing speed data
+test_end$hl_SS <- gr_intron_hl_3$half_life_min[
+    findOverlaps((test_end+10), gr_intron_hl_3, select = "first")]
+
+
+m6A_mature_f$hl_SS_start <- test_start$hl_SS[
+    match(m6A_mature_f$ID, test_start$ID)
+]
+m6A_mature_f$hl_SS_end <- test_end$hl_SS[
+    match(m6A_mature_f$ID, test_end$ID)
+]
+
+m6A_mature_f$hl_SS_mean <- rowMeans(mcols(m6A_mature_f)[, c("hl_SS_start", "hl_SS_end")] %>%
+                                          as.data.frame(.),
+                                      na.rm = T)
+m6A_mature_f$bin_ss_hls <- cut(m6A_mature_f$hl_SS_mean, breaks = c(0,5,20,60,Inf))
+```
+
+
+## Stoichiometry changes
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), aes(x = groups, y = hl_SS_mean)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,70)) + 
+    labs(y = "The intron half lives of surrounding introns (mean value)",
+         x = "m6A stoichiometry difference (mature RNA - nascent RNA)")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_mature_f$groups[!is.na(m6A_mature_f$hl_SS_mean)])
+```
+
+
+
+
+## Stoichiometry in nascent RNA using TT-eTAM m6A
+
+:::panel-tabset
+
+## Stoichiometry in intron
+
+```{r}
+m6A_tt <- readRDS("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/rds/m6A_tt.rds")
+o <- findOverlaps(m6A_tt, gr_intron_hl_3, select = "first")
+
+m6A_tt$intron_hl <- gr_intron_hl_3$half_life_min[o]
+m6A_tt$intron_id <- gr_intron_hl_3$Intron_ID[o]
+
+m6A_tt$bin_ss_hls <- cut(m6A_tt$intron_hl, breaks = c(0,10,20,30,60,Inf))
+m6A_tt$seq5 <- getSeq(Hsapiens, m6A_tt+2)
+
+p <- ggplot(as.data.frame(m6A_tt[!is.na(m6A_tt$bin_ss_hls)]), 
+       aes(x = bin_ss_hls, y = mean_A2A_dmso)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,1)) + 
+    labs(y = "m6A stoichiometry in nascent RNA",
+         x = "Intron half lives")
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_tt[!is.na(m6A_tt$bin_ss_hls)]$bin_ss_hls)
+```
+
+
+## Intron m6A number
+
+```{r}
+t <- as.data.frame(m6A_tt) %>% group_by(intron_id) %>%
+    summarise(m6A_number = n())
+gr_intron_hl_3$m6A_n <- t$m6A_number[match(gr_intron_hl_3$Intron_ID, t$intron_id)]
+gr_intron_hl_3$intron_length <- width(gr_intron_hl_3)
+
+gr_intron_hl_3$normalized_m6A_n <- gr_intron_hl_3$m6A_n/gr_intron_hl_3$intron_length
+gr_intron_hl_3$hl_bins <- cut(gr_intron_hl_3$half_life_min, breaks = c(0,10,20,30,60,Inf))
+
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = hl_bins,y = m6A_n)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,10))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Intron m6A number normalized to intron length
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = hl_bins,y = normalized_m6A_n)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,0.003))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+```{r}
+table(gr_intron_hl_3[!is.na(gr_intron_hl_3$normalized_m6A_n)]$hl_bins)
+```
+
+## Intron length
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = hl_bins,y = log2(intron_length))) + 
+    geom_boxplot(outlier.shape = NA)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(gr_intron_hl_3[!is.na(gr_intron_hl_3$intron_length)]$hl_bins)
+```
+
+
+## Exonic m6A number 
+
+```{r}
+m6A_mature_f$chromosome <- seqnames(m6A_mature_f) %>% as.character(.)
+m6A_mature_f$exon_id <- paste0(m6A_mature_f$chromosome, ":", m6A_mature_f$exon_start,"-",
+                               m6A_mature_f$exon_end)
+m6A_mature_f$exon_len <- m6A_mature_f$exon_end - m6A_mature_f$exon_start
+
+n_m6A_exon <- as.data.frame(m6A_mature_f) %>% group_by(exon_id, exon_len, bin_ss_hls) %>%
+    summarise(m6A_count = n(), .groups = "drop")
+
+n_m6A_exon$normalized_m6A_n <- n_m6A_exon$m6A_count/n_m6A_exon$exon_len
+
+p <- ggplot(n_m6A_exon[!is.na(n_m6A_exon$bin_ss_hls),], aes(x = bin_ss_hls,y = m6A_count)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,15))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Exonic normalized m6A number
+
+```{r}
+p <- ggplot(n_m6A_exon[!is.na(n_m6A_exon$bin_ss_hls),], aes(x = bin_ss_hls, y = normalized_m6A_n)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,0.01)) + 
+    labs(title = "Exonic normalized m6A number")
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(n_m6A_exon$bin_ss_hls[!is.na(n_m6A_exon$normalized_m6A_n)])
+```
+## m6A close to SS
+
+```{r}
+m6A_mature_f$bin_ss_hls <- cut(m6A_mature_f$hl_SS_mean, breaks = c(0,10,20,30,60,Inf))
+m6A_mature_f_ss <- m6A_mature_f[which(m6A_mature_f$dis_SS < 150)]
+
+## keep one line for each exon id
+n_bin <- m6A_mature_f %>% as.data.frame(.) %>%
+    group_by(exon_id) %>%
+    filter(row_number() == 1)
+t <- table(n_bin$bin_ss_hls) %>% as.data.frame(.)
+
+n_m6A_exon <- as.data.frame(m6A_mature_f_ss) %>% group_by(bin_ss_hls) %>%
+    summarise(m6A_count = n(), .groups = "drop")
+n_m6A_exon$bin_number <- t$Freq[match(n_m6A_exon$bin_ss_hls, t$Var1)]
+
+n_m6A_exon$m6A_number_per_bin <- n_m6A_exon$m6A_count/n_m6A_exon$bin_number
+
+p1 <- ggplot(n_m6A_exon[!is.na(n_m6A_exon$bin_ss_hls),], 
+             aes(x = bin_ss_hls,y = m6A_number_per_bin)) + 
+    geom_col() + 
+    labs(y = "Number of m6A close to SS (<150nt) per bin",
+         x = "Intron half lives (mean)")
+p2 <- ggplot(n_m6A_exon[!is.na(n_m6A_exon$bin_ss_hls),], 
+         aes(x = bin_ss_hls,y = m6A_number_per_bin)) + 
+    geom_col() + 
+    coord_cartesian(ylim = c(0.6,0.85)) + 
+    labs(y = "Number of m6A close to SS (<150nt) per bin",
+         x = "Intron half lives (mean)")
+
+p1+p2
+```
+
+```{r}
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+# Intron HLs QC
+
+```{r}
+gr_intron_hl_3 <- gr_intron_hl_3[seqnames(gr_intron_hl_3) %in% standardChromosomes(gr_intron_hl_3)]
+gr_intron_hl_3$intron_length <- width(gr_intron_hl_3)
+gr_intron_hl_3$seq <- getSeq(Hsapiens, gr_intron_hl_3)
+gr_intron_hl_3$G_number <- str_count(as.character(gr_intron_hl_3$seq), "G")
+gr_intron_hl_3$C_number <- str_count(as.character(gr_intron_hl_3$seq), "C")
+gr_intron_hl_3$GC_number <- gr_intron_hl_3$G_number + gr_intron_hl_3$C_number
+gr_intron_hl_3$GC_content <- gr_intron_hl_3$GC_number/gr_intron_hl_3$intron_length
+
+## splice motif
+gr_intron_hl_3$s_motif <- sapply(as.character(gr_intron_hl_3$seq), function(x) {
+  n <- nchar(x)                 # string length
+  if (n >= 4) {
+    paste0(substr(x, 1, 2), substr(x, n-1, n))
+  } else {
+    NA   # return NA if string is too short
+  }
+})
+
+
+gr_intron_hl_3$hl_bins <- cut(gr_intron_hl_3$half_life_min, breaks = c(0,10,20,30,60,Inf))
+# saveRDS(gr_intron_hl_3,"rds/intron_HL_new.rds")
+```
+
+## Median of intron half lives and number of introns
+
+```{r}
+median(gr_intron_hl_3$half_life_min)
+```
+
+```{r}
+length(gr_intron_hl_3)
+```
+
+
+## GC content
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3[!is.na(gr_intron_hl_3$hl_bins)]),
+       aes(x = hl_bins, y = GC_content)) + 
+    geom_boxplot(outlier.shape = NA) +
+    labs(x = "HLs (mins)") +
+    coord_cartesian(ylim = c(0.19,0.8))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(gr_intron_hl_3$hl_bins[!is.na(gr_intron_hl_3$GC_content)])
+```
+
+## Splicing strength
+
+```{r}
+#| fig-width: 9
+library(VarCon)
+gr_intron_hl_3$seq_plus3 <- getSeq(Hsapiens, gr_intron_hl_3+3)
+gr_intron_hl_3$seq_donor <- substr(gr_intron_hl_3$seq_plus3, 1, 9)
+gr_intron_hl_3$seq_acceptor <- str_sub(as.character(gr_intron_hl_3$seq_plus3), start = -23)
+
+
+gr_intron_hl_3$MaxEnt_donor <- calculateMaxEntScanScore(as.character(gr_intron_hl_3$seq_donor), 5) %>% 
+    as.numeric(.)
+gr_intron_hl_3$MaxEnt_acceptor <- calculateMaxEntScanScore(as.character(gr_intron_hl_3$seq_acceptor), 3) %>% 
+    as.numeric(.)
+
+p1 <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = hl_bins, y = MaxEnt_donor)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,12))
+p2 <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = hl_bins, y = MaxEnt_acceptor)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,15))
+
+p1+p2 
+```
+
+```{r}
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(gr_intron_hl_3$hl_bins[!is.na(gr_intron_hl_3$MaxEnt_donor)])
+```
+
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(gr_intron_hl_3$hl_bins[!is.na(gr_intron_hl_3$MaxEnt_acceptor)])
+```
+
+```{r}
+p1 <- ggplot(as.data.frame(gr_intron_hl_3), aes(color = hl_bins, x = MaxEnt_donor)) + 
+    stat_ecdf() + 
+    coord_cartesian(xlim = c(-1,12))  + 
+    labs(y = "Accumulated fraction")
+p2 <- ggplot(as.data.frame(gr_intron_hl_3), aes(color = hl_bins, x = MaxEnt_acceptor)) + 
+    stat_ecdf() + 
+    coord_cartesian(xlim = c(-1,12)) + 
+    labs(y = "Accumulated fraction")
+p1+p2
+```
+
+```{r}
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+# Intron half lives for intron with and without m6A
+
+```{r}
+All_m6A <- readRDS("~/Desktop/Data/Julian_lab/Peter/eTAM/TT_eTAM_STM/RDS/All_m6A_new.rds")
+All_m6A <- makeGRangesFromDataFrame(All_m6A, keep.extra.columns = T)
+
+gr_intron_hl_3$with_m6A <- case_when(gr_intron_hl_3 %over% All_m6A ~ "With m6A",
+                              T ~ "Without m6A")
+
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = with_m6A, y = log2(half_life_min))) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "Intron half lives (log2 scale)", x = "Intron with/without m6A") + 
+    coord_cartesian(ylim = c(0,11)) + 
+    stat_compare_means(comparisons = list(c("With m6A", "Without m6A")), label = "p.signif",
+                       label.y = 8.5)
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(gr_intron_hl_3$with_m6A[!is.na(gr_intron_hl_3$half_life_min)])
+```
+
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(color = with_m6A, x = log2(half_life_min))) + 
+    stat_ecdf() + 
+    labs(x = "Intron half lives (log2 scale)", color = "Intron with/without m6A") + 
+    coord_cartesian(xlim = c(0,11))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+## Nascent and dif
+
+```{r}
+
+p1 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$bin_ss_hls)]), 
+       aes(y = A2A_tt_wt, x = bin_ss_hls, fill = groups)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "Stoichiometry in nascent RNA",
+         x = "Intron HLs", fill = "Stoi dif M-N")
+
+p2 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$bin_ss_hls)]), 
+       aes(x = bin_ss_hls, fill = groups)) + 
+    geom_bar(position = "fill") + 
+    labs(y = "Fraction",
+         x = "Intron HLs", fill = "Stoi dif M-N")
+p1+p2
+```
+
+```{r}
+table(m6A_mature_f$bin_ss_hls[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$bin_ss_hls)])
+```
+
+
+
+```{r}
+m6A_mature_f$nascent_bin_stoi <- cut(m6A_mature_f$A2A_tt_wt, 
+                                     breaks = c(-0.1,0.2,0.4,0.6,Inf))
+p1 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$nascent_bin_stoi)]), 
+       aes(x = nascent_bin_stoi, y = log2(hl_SS_mean), fill = groups)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "Stoichiometry in nascent RNA",
+         y = "Intron HLs", fill = "Stoi dif M-N") + 
+    coord_cartesian(ylim = c(-0.5,9))
+
+p2 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$nascent_bin_stoi)]), 
+       aes(x = nascent_bin_stoi, fill = groups)) + 
+    geom_bar(position = "fill") + 
+    labs(y = "Fraction",
+         x = "Stoi nascent", fill = "Stoi dif M-N")
+p1+p2
+```
+
+
+
+```{r}
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_mature_f$nascent_bin_stoi[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$bin_ss_hls)])
+```
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$nascent_bin_stoi)]), 
+       aes(fill = nascent_bin_stoi, y = log2(hl_SS_mean), x = groups)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(fill = "Stoichiometry in nascent RNA",
+         y = "Intron HLs", x = "Stoi dif M-N") + 
+    coord_cartesian(ylim = c(-0.5,9))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_mature_f$groups[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$nascent_bin_stoi)])
+```
+
+
+## Mature and dif
+
+```{r}
+m6A_mature_f$mature_bin_stoi <- cut(m6A_mature_f$mean_A2A_dmso, 
+                                     breaks = c(-0.1,0.2,0.4,0.6,Inf))
+p1 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$mature_bin_stoi)]), 
+       aes(x = mature_bin_stoi, y = log2(hl_SS_mean), fill = groups)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "Stoichiometry in mature RNA",
+         y = "Intron HLs", fill = "Stoi dif M-N") + 
+    coord_cartesian(ylim = c(-0.5,9))
+
+p2 <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$mature_bin_stoi)]), 
+       aes(x = mature_bin_stoi, fill = groups)) + 
+    geom_bar(position = "fill") + 
+    labs(y = "Fraction",
+         x = "Stoi mature", fill = "Stoi dif M-N")
+p1+p2
+```
+
+```{r}
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_mature_f$mature_bin_stoi[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$mature_bin_stoi)])
+```
+
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$mature_bin_stoi)]), 
+       aes(fill = mature_bin_stoi, y = log2(hl_SS_mean), x = groups)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(fill = "Stoichiometry in mature RNA",
+         y = "Intron HLs", x = "Stoi dif M-N") + 
+    coord_cartesian(ylim = c(-0.5,9))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+table(m6A_mature_f$groups[!is.na(m6A_mature_f$groups) &
+                                      !is.na(m6A_mature_f$mature_bin_stoi)])
+```
+
+
+# Accumulated plot for intron half lives
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = log10(half_life_min))) + 
+    geom_density(fill = "steelblue", alpha = 0.45, color = "steelblue") +
+    geom_vline(xintercept = log10(median(gr_intron_hl_3$half_life_min)), linetype = 2) +
+    scale_x_continuous(breaks = log10(c(1, round(median(gr_intron_hl_3$half_life_min),3),  100, 1000)),
+                       labels = c("1", round(median(gr_intron_hl_3$half_life_min), 3),  "100", "1000")) + 
+    labs(title = paste0("Median of intron half lives: ", round(median(gr_intron_hl_3$half_life_min),3)),
+         x = "Intron half lives (log10 scale)")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(gr_intron_hl_3), aes(x = log10(half_life_min))) + 
+    stat_ecdf() +
+    geom_vline(xintercept = log10(median(gr_intron_hl_3$half_life_min)), linetype = 2) +
+    scale_x_continuous(breaks = log10(c(1, round(median(gr_intron_hl_3$half_life_min),3),  100, 1000)),
+                       labels = c("1", round(median(gr_intron_hl_3$half_life_min), 3),  "100", "1000")) + 
+    labs(title = paste0("Median of intron half lives: ", round(median(gr_intron_hl_3$half_life_min),3)),
+         y = "Accumulated fraction",  x = "Intron half lives (log10 scale)")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+# Supplementary table
+
+```{r}
+df_intron_hl <- as.data.frame(gr_intron_hl_3)
+df_intron_hl <- df_intron_hl[,c(6,1:5,12,13,14,15,16,21)] 
+
+write.xlsx(df_intron_hl, "tables/Supplementary Table Sxx Intron Half-lives.xlsx")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1607 @@
+---
+title: "02 m6A deposition before splicing (exonic m6A)"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Julius-Maximilians-Universität Würzburg
+      affiliation-url: https://www.uni-wuerzburg.de/
+title-block-banner: true
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+execute:
+  echo: false
+  error: false
+  warning: false
+editor: 
+  markdown: 
+    wrap: 100
+---
+
+```{r}
+#| echo: false
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library(eulerr)
+library(ggsignif)
+library(tidyplots)
+library(gt)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+library(grid)
+## My functions and colors
+source("/Users/codezy/Desktop/Project/homemade_functions/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+## To make sure the number is in 150000000 format instead of 1.5e+08
+options(scipen = 999)
+
+## set theme skin
+font_szie <- 6
+linesize <- 0.5
+lw <- 0.5
+
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw)))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+update_geom_defaults("abline",   list(color = "#993404", size = linesize))
+
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+basemean <- 10
+pvalue <- 0.05
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")
+DRACN <- "[GAT][GA]AC[ATCG]"
+
+fix_panel_size <- function(p, panel_width = 3, panel_height = 3, unit = "cm") {
+  gt <- ggplotGrob(p)
+  pp <- gt$layout[gt$layout$name == "panel", ]
+
+  gt$widths[pp$l]  <- grid::unit(panel_width, unit)
+  gt$heights[pp$t] <- grid::unit(panel_height, unit)
+
+  gt
+}
+
+panel_width <- 3
+panel_height <- 3
+```
+
+# Introduction
+
+This report collects code for analysing TT-eTAM-seq data.
+
+----------------------------------------------------------------------------------------------------
+
+# Highly confident m6A identification
+
+## mature RNA eTAMseq
+
+```{r}
+#| eval: false
+#| include: true
+path_data <- "~/Desktop/Data/Julian_lab/Sarah/eTAMseq/imb_koenig_2024_13_hallstein_eTAMseq_HEK293T/AandGcounts/"
+file_etam <- list.files(path_data)
+thresh_count <- 5
+
+getstr <- 
+function(mystring, initial.character, dijige_str_ini = 1,final.character, dijige_str_final = 1 ,plus1 = F){
+    # check that all 3 inputs are character variables
+    if (!is.character(mystring))
+    {
+        stop('The parent string must be a character variable.')
+    }
+
+    if (!is.character(initial.character))
+    {
+        stop('The initial character must be a character variable.')
+    }
+
+
+    if (!is.character(final.character))
+    {
+        stop('The final character must be a character variable.')
+    }
+
+
+
+    # pre-allocate a vector to store the extracted strings
+    snippet = rep(0, length(mystring))
+
+
+
+    for (i in 1:length(mystring))
+    {
+        # extract the initial position
+        initial.position = gregexpr(initial.character, mystring[i])[[1]][dijige_str_ini] + nchar(initial.character)
+
+        if (plus1 == T) {
+            final.position = gregexpr(final.character, mystring[i])[[1]][dijige_str_final] - nchar(final.character) + 1
+        }
+        else{
+            # extract the final position
+            final.position = gregexpr(final.character, mystring[i])[[1]][dijige_str_final] - nchar(final.character)
+        }
+
+        # extract the substring between the initial and final positions, inclusively
+        snippet[i] = substr(mystring[i], initial.position, final.position)
+    }
+
+    return(snippet)
+}
+
+list_etam <- list()
+
+## read all data into a list
+for (i in 1:8) {
+    df_etam <- read_tsv(paste0(path_data, file_etam[i]), col_names = FALSE)
+    colnames(df_etam) <- c("seqnames", "start", "end", "Acount", "Gcount", "strand")
+    df_etam$coverage <- df_etam$Acount + df_etam$Gcount
+    df_etam <- df_etam[df_etam$coverage > thresh_count,]
+    ## must to use end instead of start to make sure the coordinates are correct (bed file issue)
+    df_etam$ID <- paste0(df_etam$seqnames,":", df_etam$end, " ", df_etam$strand)
+    list_etam[[i]] <- df_etam
+    names(list_etam)[[i]] <- getstr(file_etam[i], "_", 5, "\\.", 1,plus1 = T)
+    print(paste0(file_etam[i], " finished"))
+}
+tmp <- c()
+## keep the unique position which have signal
+for (i in 1:length(list_etam)) {
+    tmp <- c(tmp, list_etam[[i]]$ID)
+}
+eTAM_data <- data.frame(ID = unique(tmp)) 
+
+## make the big table content all data
+for (i in 1:8) {
+    ## Assign A and G count for each position
+    eTAM_data[,paste0("Acount_", names(list_etam)[i])] <- 
+        list_etam[[i]]$Acount[match(eTAM_data$ID, list_etam[[i]]$ID)]
+    eTAM_data[,paste0("Gcount_", names(list_etam)[i])] <- 
+        list_etam[[i]]$Gcount[match(eTAM_data$ID, list_etam[[i]]$ID)]
+    eTAM_data[,paste0("Cov_", names(list_etam)[i])] <- 
+        list_etam[[i]]$coverage[match(eTAM_data$ID, list_etam[[i]]$ID)]
+}
+## make NA to 0
+eTAM_data[is.na(eTAM_data)] <- 0
+
+m6A_arbi_HEK <- eTAM_data
+## convert df to GRanges
+m6A_arbi_HEK$seqnames <- gsub(":.*", "", m6A_arbi_HEK$ID)
+m6A_arbi_HEK$start <- m6A_arbi_HEK$end <- gsub(".*:", "", m6A_arbi_HEK$ID) %>% gsub(" .*", "", .)
+m6A_arbi_HEK$strand <- gsub(".* ", "", m6A_arbi_HEK$ID)
+m6A_arbi_HEK <- makeGRangesFromDataFrame(m6A_arbi_HEK, keep.extra.columns = T)
+m6A_arbi_HEK <- m6A_arbi_HEK[seqnames(m6A_arbi_HEK) %in% standardChromosomes(m6A_arbi_HEK)]
+names(m6A_arbi_HEK) <- NULL
+
+## calculating mean A2A ratio 
+## DMSO samples
+m6A_arbi_HEK$A2A_dmso_1 <- m6A_arbi_HEK$Acount_DMSO1/m6A_arbi_HEK$Cov_DMSO1
+m6A_arbi_HEK$A2A_dmso_2 <- m6A_arbi_HEK$Acount_DMSO2/m6A_arbi_HEK$Cov_DMSO2
+m6A_arbi_HEK$A2A_dmso_3 <- m6A_arbi_HEK$Acount_DMSO3/m6A_arbi_HEK$Cov_DMSO3
+m6A_arbi_HEK$A2A_dmso_4 <- m6A_arbi_HEK$Acount_DMSO4/m6A_arbi_HEK$Cov_DMSO4
+## STM samples
+m6A_arbi_HEK$A2A_stm_1 <- m6A_arbi_HEK$Acount_STM1/m6A_arbi_HEK$Cov_STM1
+m6A_arbi_HEK$A2A_stm_2 <- m6A_arbi_HEK$Acount_STM2/m6A_arbi_HEK$Cov_STM2
+m6A_arbi_HEK$A2A_stm_3 <- m6A_arbi_HEK$Acount_STM3/m6A_arbi_HEK$Cov_STM3
+m6A_arbi_HEK$A2A_stm_4 <- m6A_arbi_HEK$Acount_STM4/m6A_arbi_HEK$Cov_STM4
+
+## Mean
+m6A_arbi_HEK$mean_A2A_dmso <-
+    rowMeans(mcols(m6A_arbi_HEK)[,c("A2A_dmso_1", "A2A_dmso_2", "A2A_dmso_3", "A2A_dmso_4")] %>% 
+                 as.data.frame(.), na.rm = T)
+m6A_arbi_HEK$mean_A2A_stm <-
+    rowMeans(mcols(m6A_arbi_HEK)[,c("A2A_stm_1", "A2A_stm_2", "A2A_stm_3", "A2A_stm_4")] %>% 
+                 as.data.frame(.), na.rm = T)
+
+## Coverage mean
+m6A_arbi_HEK$mean_cov_dmso <- 
+    (m6A_arbi_HEK$Cov_DMSO1+m6A_arbi_HEK$Cov_DMSO2+
+         m6A_arbi_HEK$Cov_DMSO3+m6A_arbi_HEK$Cov_DMSO4)/4
+m6A_arbi_HEK$mean_cov_stm <- 
+    (m6A_arbi_HEK$Cov_STM1+m6A_arbi_HEK$Cov_STM2+
+         m6A_arbi_HEK$Cov_STM3+m6A_arbi_HEK$Cov_STM4)/4
+
+# saveRDS(m6A_arbi_HEK, "rds/all_mature_eTAM_hek.rds")
+## filtering for have certain coverage in both condition
+m6A_arbi_HEK <- m6A_arbi_HEK[which(m6A_arbi_HEK$mean_cov_dmso > 15 & m6A_arbi_HEK$mean_cov_stm >15)]
+m6A_arbi_HEK$dif_A2A <- m6A_arbi_HEK$mean_A2A_dmso - m6A_arbi_HEK$mean_A2A_stm
+
+m6A_arbi_HEK$m6A <- ifelse(m6A_arbi_HEK$dif_A2A >= 0.25, "m6A", "background")
+```
+
+```{r}
+#| eval: false
+
+p1 <- ggplot(as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, color = m6A)) + 
+    ggrastr::rasterise(geom_point(alpha = 0.05), dpi = 400) + 
+    labs(x = "A2A ratio DMSO (Mean)", y = "A2A ratio STM (Mean)",
+         title = "f2: Mature-eTAM seq") +
+    geom_abline(intercept = -0.25, linetype = 2) + 
+    ggrastr::rasterise(geom_point(data = as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "m6A"]), 
+                                  aes(color = m6A), alpha = 0.05), dpi = 400)  + 
+    scale_color_manual(values = c("m6A" = "red3", "background" = "grey")) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.5)))
+m6A_arbi_HEK_f <- m6A_arbi_HEK[m6A_arbi_HEK$dif_A2A >= 0.25]
+saveRDS(m6A_arbi_HEK_f, "rds/eTAM_mature_m6A_arbi.rds")
+
+ggsave(
+  filename = "plots/f2.pdf",
+  plot = p1,
+  dpi = 400
+)
+
+magick::image_read_pdf("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f2.pdf", density = 300) |>
+  magick::image_write("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f2.png")
+```
+
+```{r}
+#| eval: false
+p1 <- ggplot(as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, color = m6A)) + 
+    ggrastr::rasterise(geom_point(size = 1 / ggplot2::.pt), dpi = 400) + 
+    labs(x = "A2A ratio DMSO (Mean)", y = "A2A ratio STM (Mean)",
+         title = "f2: Mature-eTAM seq") +
+    geom_abline(intercept = -0.25, linetype = 2) + 
+    ggrastr::rasterise(geom_point(data = as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "m6A"]), 
+                                  aes(color = m6A),size = 1 / ggplot2::.pt), dpi = 400)  + 
+    scale_color_manual(values = c("m6A" = "red3", "background" = "grey")) +
+    guides(color = guide_legend(override.aes = list(alpha = 1)))
+
+ggsave(
+  filename = "plots/f2_v2.pdf",
+  plot = p1,
+  dpi = 400
+)
+
+magick::image_read_pdf("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f2_v2.pdf", density = 300) |>
+  magick::image_write("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f2_v2.png")
+```
+
+![Scatter mature eTAM](plots/f2.png){width=6cm}
+
+```{r}
+#| eval: false
+library(grid)
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+
+p <- ggplot(as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, fill = m6A)) +
+  ggrastr::rasterise(
+    geom_point(shape = 21, size = 0.2, stroke = 0.05, color = "black"),
+    dpi = 400
+  ) +
+  labs(x     = "A2A ratio DMSO (Mean)",
+       y     = "A2A ratio STM (Mean)",
+       title = "f2: Mature-eTAM seq") +
+  geom_abline(intercept = -0.25, slope = 1, linetype = 2, linewidth = lw) +
+  ggrastr::rasterise(
+    geom_point(data  = as.data.frame(m6A_arbi_HEK[m6A_arbi_HEK$m6A == "m6A"]),
+               aes(fill = m6A),
+               shape = 21, size = 0.2, stroke = 0.05, color = "black"),
+    dpi = 400
+  ) +
+  scale_fill_manual(values = c("m6A" = "red3", "background" = "grey80"),
+                    name   = "m6A") +
+  scale_x_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1),
+                     expand = c(0.01, 0.01)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1),
+                     expand = c(0.01, 0.01)) +
+  guides(fill = guide_legend(override.aes = list(size = 2, stroke = 0.3))) +
+  theme_bw(base_size = 6) +
+  theme(
+    text              = element_text(size = 6, family = "Arial"),
+    axis.text         = element_text(size = 6, family = "Arial"),
+    axis.title        = element_text(size = 6, family = "Arial"),
+    plot.title        = element_text(size = 6, face = "bold", family = "Arial"),
+    legend.text       = element_text(size = 6, family = "Arial"),
+    legend.title      = element_text(size = 6, family = "Arial"),
+    panel.border      = element_rect(linewidth = lw, fill = NA, color = "black"),
+    axis.line         = element_blank(),
+    axis.ticks        = element_line(linewidth = lw, color = "black"),
+    axis.ticks.length = unit(1.5, "pt"),
+    panel.grid.major  = element_line(linewidth = lw * 0.5, color = "grey88"),
+    panel.grid.minor  = element_blank(),
+    legend.key.size   = unit(3, "mm"),
+    plot.margin       = margin(3, 3, 3, 3, "mm")
+  )
+
+gt <- ggplotGrob(p)
+pp <- gt$layout[gt$layout$name == "panel", ]
+gt$widths[pp$l]  <- unit(3, "cm")
+gt$heights[pp$t] <- unit(3, "cm")
+
+cairo_pdf("plots/etam_seq_mature.pdf",
+          width  = 8 * 0.3937,
+          height = 7 * 0.3937,
+          family = "Arial")
+grid.newpage()
+grid.draw(gt)
+dev.off()
+```
+
+### Basic status for mature eTAM
+
+:::panel-tabset
+
+## seqlogo
+
+```{r}
+## load mature eTAM result
+m6A_mature <- readRDS("rds/eTAM_mature_m6A_arbi.rds")
+m6A_mature$kmer9 <- getSeq(Hsapiens, m6A_mature+4)
+
+p <- ggseqlogo(as.character(m6A_mature$kmer9)) + 
+    ggtitle("High confident mature eTAM m6A sites") + 
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+#| eval: false
+## export bed file
+m6A_mature$score <- m6A_mature$mean_A2A_dmso
+export.bed(m6A_mature, "rds/eTAM_mature_m6A.bed")
+```
+
+
+:::
+
+## TT-eTAMseq
+
+```{r}
+## Data loading
+eTAM_data <- readRDS("~/Desktop/Data/Julian_lab/Peter/eTAM/TT_eTAM_STM/TT_eTAM_f.rds")
+## convert df to GRanges
+eTAM_data$seqnames <- gsub(":.*", "", eTAM_data$ID)
+eTAM_data$start <- eTAM_data$end <- gsub(".*:", "", eTAM_data$ID) %>% gsub(" .*", "", .)
+eTAM_data$strand <- gsub(".* ", "", eTAM_data$ID)
+eTAM_data <- makeGRangesFromDataFrame(eTAM_data, keep.extra.columns = T)
+eTAM_data <- eTAM_data[seqnames(eTAM_data) %in% standardChromosomes(eTAM_data)]
+names(eTAM_data) <- NULL
+
+## calculating mean A2A ratio 
+## DMSO samples
+eTAM_data$A2A_dmso_1 <- eTAM_data$Acount_DMSO_rep1/eTAM_data$Cov_DMSO_rep1
+eTAM_data$A2A_dmso_2 <- eTAM_data$Acount_DMSO_rep2/eTAM_data$Cov_DMSO_rep2
+eTAM_data$A2A_dmso_3 <- eTAM_data$Acount_DMSO_rep3/eTAM_data$Cov_DMSO_rep3
+eTAM_data$A2A_dmso_4 <- eTAM_data$Acount_DMSO_rep4/eTAM_data$Cov_DMSO_rep4
+## STM samples
+eTAM_data$A2A_stm_1 <- eTAM_data$Acount_STM2457_rep1/eTAM_data$Cov_STM2457_rep1
+eTAM_data$A2A_stm_2 <- eTAM_data$Acount_STM2457_rep2/eTAM_data$Cov_STM2457_rep2
+eTAM_data$A2A_stm_3 <- eTAM_data$Acount_STM2457_rep3/eTAM_data$Cov_STM2457_rep3
+eTAM_data$A2A_stm_4 <- eTAM_data$Acount_STM2457_rep4/eTAM_data$Cov_STM2457_rep4
+
+## Mean
+eTAM_data$mean_A2A_dmso <-
+    rowMeans(mcols(eTAM_data)[,c(grep("A2A_dmso", colnames(mcols(eTAM_data))))] %>% 
+                 as.data.frame(.), na.rm = T)
+eTAM_data$mean_A2A_stm <-
+    rowMeans(mcols(eTAM_data)[,c(grep("A2A_stm", colnames(mcols(eTAM_data))))] %>% 
+                 as.data.frame(.), na.rm = T)
+
+## Coverage mean
+eTAM_data$mean_cov_dmso <- 
+    (eTAM_data$Cov_DMSO_rep1+eTAM_data$Cov_DMSO_rep2+
+         eTAM_data$Cov_DMSO_rep3+eTAM_data$Cov_DMSO_rep4)/4
+eTAM_data$mean_cov_stm <- 
+    (eTAM_data$Cov_STM2457_rep1+eTAM_data$Cov_STM2457_rep2+
+         eTAM_data$Cov_STM2457_rep3+eTAM_data$Cov_STM2457_rep4)/4
+## filtering for have certain coverage in both condition
+eTAM_data <- eTAM_data[which(eTAM_data$mean_cov_dmso > 15 & eTAM_data$mean_cov_stm >15)]
+eTAM_data$dif_A2A <- eTAM_data$mean_A2A_dmso - eTAM_data$mean_A2A_stm
+eTAM_data$m6A  <- ifelse(eTAM_data$dif_A2A >= 0.25, "m6A", "background")
+```
+
+```{r}
+tmp <-eTAM_data[eTAM_data$m6A == "m6A"] 
+tmp$score <- tmp$mean_A2A_dmso
+export.bed(tmp, "rds/m6A_TTeTAM.bed")
+```
+
+### Basic status of TT-eTAM-seq data
+
+#### A2A ratio
+
+```{r}
+#| eval: false
+p <- ggplot(as.data.frame(eTAM_data[eTAM_data$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, color = m6A)) + 
+    ggrastr::rasterise(geom_point(alpha = 0.05), dpi = 400) + 
+    labs(x = "A2A ratio DMSO (Mean)", y = "A2A ratio STM (Mean)",
+         title = "f1: TT-eTAM seq") +
+    geom_abline(intercept = -0.25, linetype = 2) + 
+    ggrastr::rasterise(geom_point(data = as.data.frame(eTAM_data[eTAM_data$m6A == "m6A"]), 
+                                  aes(color = m6A), alpha = 0.05), dpi = 400)  + 
+    scale_color_manual(values = c("m6A" = "red3", "background" = "grey")) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.5)))
+ggsave(
+  filename = "plots/f1.pdf",
+  plot = p,
+  dpi = 400
+)
+magick::image_read_pdf("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f1.pdf", density = 300) |>
+  magick::image_write("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f1.png")
+```
+
+
+
+![Scatter TT-eTAM](plots/f1.png){width=6cm}
+
+```{r}
+#| eval: false
+p <- ggplot(as.data.frame(eTAM_data[eTAM_data$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, color = m6A)) + 
+    ggrastr::rasterise(geom_point(size = 1 / ggplot2::.pt), dpi = 400) + 
+    labs(x = "A2A ratio DMSO (Mean)", y = "A2A ratio STM (Mean)",
+         title = "f1: TT-eTAM seq") +
+    geom_abline(intercept = -0.25, linetype = 2) + 
+    ggrastr::rasterise(geom_point(data = as.data.frame(eTAM_data[eTAM_data$m6A == "m6A"]), 
+                                  aes(color = m6A), size = 1 / ggplot2::.pt), dpi = 400)  + 
+    scale_color_manual(values = c("m6A" = "red3", "background" = "grey")) +
+    guides(color = guide_legend(override.aes = list(alpha = 1)))
+ggsave(
+  filename = "plots/f1_v2.pdf",
+  plot = p,
+  dpi = 400
+)
+magick::image_read_pdf("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f1_v2.pdf", density = 300) |>
+  magick::image_write("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/02 m6A deposition before splicing/plots/f1_v2.png")
+```
+
+```{r}
+#| eval: false
+library(grid)
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+
+lw <- 0.5
+
+p <- ggplot(as.data.frame(eTAM_data[eTAM_data$m6A == "background"]), 
+       aes(x = mean_A2A_dmso, y = mean_A2A_stm, fill = m6A)) +
+  ggrastr::rasterise(
+    geom_point(shape = 21, size = 0.2, stroke = 0.05, color = "black"),
+    dpi = 400
+  ) +
+  labs(x     = "A2A ratio DMSO (Mean)",
+       y     = "A2A ratio STM (Mean)",
+       title = "f1: TT-eTAM seq") +
+  geom_abline(intercept = -0.25, slope = 1, linetype = 2, linewidth = lw) +
+  ggrastr::rasterise(
+    geom_point(data  = as.data.frame(eTAM_data[eTAM_data$m6A == "m6A"]),
+               aes(fill = m6A),
+               shape = 21, size = 0.2, stroke = 0.05, color = "black"),
+    dpi = 400
+  ) +
+  scale_fill_manual(values = c("m6A" = "red3", "background" = "grey80"),
+                    name   = "m6A") +
+  scale_x_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1),
+                     expand = c(0.01, 0.01)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1),
+                     expand = c(0.01, 0.01)) +
+  guides(fill = guide_legend(override.aes = list(size = 2, stroke = 0.3))) +
+  theme_bw(base_size = 6) +
+  theme(
+    text              = element_text(size = 6, family = "Arial"),
+    axis.text         = element_text(size = 6, family = "Arial"),
+    axis.title        = element_text(size = 6, family = "Arial"),
+    plot.title        = element_text(size = 6, face = "bold", family = "Arial"),
+    legend.text       = element_text(size = 6, family = "Arial"),
+    legend.title      = element_text(size = 6, family = "Arial"),
+    panel.border      = element_rect(linewidth = lw, fill = NA, color = "black"),
+    axis.line         = element_blank(),
+    axis.ticks        = element_line(linewidth = lw, color = "black"),
+    axis.ticks.length = unit(1.5, "pt"),
+    panel.grid.major  = element_line(linewidth = lw * 0.5, color = "grey88"),
+    panel.grid.minor  = element_blank(),
+    legend.key.size   = unit(3, "mm"),
+    plot.margin       = margin(3, 3, 3, 3, "mm")
+  )
+
+gt <- ggplotGrob(p)
+pp <- gt$layout[gt$layout$name == "panel", ]
+gt$widths[pp$l]  <- unit(3, "cm")
+gt$heights[pp$t] <- unit(3, "cm")
+
+cairo_pdf("etam_seq.pdf",
+          width  = 8 * 0.3937,
+          height = 7 * 0.3937,
+          family = "Arial")
+grid.newpage()
+grid.draw(gt)
+dev.off()
+```
+
+```{r}
+m6A_tt <- eTAM_data[eTAM_data$dif_A2A >= 0.25]
+
+df <- data.frame(Number = c(length(eTAM_data), length(m6A_tt)),
+                 Group = c("All sites", "m6A sites"))
+
+p <- ggplot(df, aes(x = Group, y = Number, label = Number)) + 
+    geom_col() + 
+    geom_label()
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+m6A_tt$kmer9 <- getSeq(Hsapiens, m6A_tt+4)
+
+p <- ggseqlogo(as.character(m6A_tt$kmer9)) + 
+    ggtitle("High confident TT-eTAM m6A sites") + 
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+## get metaprofile result
+m6A_tt <- metaGeneProfile(m6A_tt, 
+    "~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")[[1]]
+m6A_mature <- metaGeneProfile(m6A_mature, 
+    "~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")[[1]]
+
+m6A_tt$group <- "TT-eTAM"
+m6A_mature$group <- "mature-eTAM"
+
+tmp <- c(m6A_tt, m6A_mature) %>% as.data.frame()
+
+tmp$Position[tmp$location == "CDS"] <-
+        tmp$Position[tmp$location == "CDS"] + 1
+tmp$Position[tmp$location == "UTR3"] <-
+    tmp$Position[tmp$location == "UTR3"] + 2
+p <- ggplot(tmp[tmp$location != "NO",], aes(x = Position, color = group)) +
+    geom_density(fill = "white", alpha= 0.05)  +
+    ggtitle("Metagene profile") +
+    geom_vline(xintercept=c(1,2), linetype=2, color="cornflowerblue") +
+    scale_x_continuous(breaks = c(0.5,1.5,2.5),
+                       labels = c("5'UTR","CDS","3'UTR"))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## TT-eTAM m6A location
+
+```{r}
+m6A_assignment_intron_version <- function(gr, anno){
+    
+    ## processing anno
+    exon <- anno[anno$type == "exon"]
+    tran_length <- as.data.frame(exon) %>% group_by(transcript_id, gene_id) %>%
+        summarise(trans_len = sum(width), .groups = "drop")
+
+    exon$trans_len <- tran_length$trans_len[match(exon$transcript_id, tran_length$transcript_id)]
+    exon$exon_number <- as.numeric(exon$exon_number)
+
+    exon <- as.data.frame(exon) %>% group_by(transcript_id) %>%
+        mutate(exon_total = max(exon_number)) %>%
+        makeGRangesFromDataFrame(., keep.extra.columns = T)
+    exon <- exon[order(exon$level, exon$transcript_support_level, -exon$trans_len)]
+
+    gene <- anno[anno$type == "gene"]
+    
+    ## save the used for later usage
+    used <- anno[anno$type %in%c("exon")]
+    used$transcript_length <- exon$trans_len[match(used$transcript_id, exon$transcript_id)]
+    
+    ## get intron annotation
+    exon$exonID <- paste0(exon$transcript_id, ",", exon$exon_number)
+    introns <- setdiff(gene, exon)
+    o <- findOverlaps(introns, gene, select = "first")
+    introns$gene_id <- gene$gene_id[o]
+    introns$gene_name <- gene$gene_name[o]
+    
+    ## assgined first to annotations
+    used <- used[order(used$level, used$transcript_support_level,
+                                   -used$transcript_length)]
+    introns$type <- "intron"
+    introns$transcript_id <- NA
+    merge_anno <- c(introns, used)
+    
+    ## assign the sites based on the hirachy
+    o <- findOverlaps(gr, merge_anno, select = "first")
+    
+    gr$type <- merge_anno$type[o]
+    gr$gene_id <- merge_anno$gene_id[o]
+    gr$transcript_id <- merge_anno$transcript_id[o]
+    gr$gene_name <- merge_anno$gene_name[o]
+    return(gr)
+}
+```
+
+```{r}
+## assign m6A
+# getnumber_mature <- m6A_assignment_intron_version(m6A_mature, hg38)
+m6A_tt <- m6A_assignment_intron_version(m6A_tt, hg38)
+saveRDS(m6A_tt, "rds/m6A_tt_new.rds")
+m6A_tt$type <- as.character(m6A_tt$type)
+m6A_tt$type[is.na(m6A_tt$type)] <- "No assigned"
+
+p <- ggplot(as.data.frame(m6A_tt), aes(x = fct_infreq(type))) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count") +
+    labs(x = NULL, title = "The distribution of m6A sites on transcripts")
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+df <- as.data.frame(m6A_tt) %>% group_by(type) %>% summarise(number = n())
+p <- ggplot(df, aes(x = "", y = number, fill = type)) +
+  geom_col(color = "black") +
+  geom_text(aes(label = number), 
+            position = position_stack(vjust = 0.5)) +
+  coord_polar(theta = "y") +
+  scale_fill_brewer() +
+  theme_void()
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+## Intronic m6A from nascent RNA are not detected in mature RNA
+
+```{r}
+m6A_tt$overlap_mature <- m6A_tt %over% m6A_mature
+
+p <- ggplot(as.data.frame(m6A_tt[!is.na(m6A_tt$type)]), aes(x = type, fill = overlap_mature)) + 
+    geom_bar() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    labs(x = NULL) + 
+    geom_text(stat = "count", aes(label = after_stat(count),
+      group = overlap_mature), position = position_stack(vjust = 0.5), size = 4, vjust = 0.5)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_tt[!is.na(m6A_tt$type)]), aes(x = type, fill = overlap_mature)) + 
+    geom_bar(position = "fill") + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+    labs(y = "Fraction") +
+    labs(x = NULL)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Stoichiometry correlation between mature and nascent and identifying different m6A groups
+
+```{r}
+#| eval: false
+#| include: true
+
+## The code was run on cluster
+
+## all_m6A are the combination of m6A which detected in TT- and mature eTAM seq
+all_m6A <- readRDS("/storage/zar/projects/you/R_script/all_m6A_df.rds")
+## This object contains all the A2A ratio for all A sites in TT-eTAMseq
+eTAM_data <- readRDS("/storage/zar/projects/you/R_script/out/TT_eTAM_ori.rds")
+
+## calculating mean A2A ratio 
+## DMSO samples
+eTAM_data$A2A_dmso_1 <- eTAM_data$Acount_DMSO_rep1/eTAM_data$Cov_DMSO_rep1
+eTAM_data$A2A_dmso_2 <- eTAM_data$Acount_DMSO_rep2/eTAM_data$Cov_DMSO_rep2
+eTAM_data$A2A_dmso_3 <- eTAM_data$Acount_DMSO_rep3/eTAM_data$Cov_DMSO_rep3
+eTAM_data$A2A_dmso_4 <- eTAM_data$Acount_DMSO_rep4/eTAM_data$Cov_DMSO_rep4
+## STM samples
+eTAM_data$A2A_stm_1 <- eTAM_data$Acount_STM2457_rep1/eTAM_data$Cov_STM2457_rep1
+eTAM_data$A2A_stm_2 <- eTAM_data$Acount_STM2457_rep2/eTAM_data$Cov_STM2457_rep2
+eTAM_data$A2A_stm_3 <- eTAM_data$Acount_STM2457_rep3/eTAM_data$Cov_STM2457_rep3
+eTAM_data$A2A_stm_4 <- eTAM_data$Acount_STM2457_rep4/eTAM_data$Cov_STM2457_rep4
+
+
+## Mean
+eTAM_data$mean_A2A_dmso <-
+    rowMeans(eTAM_data[,c("A2A_dmso_1", "A2A_dmso_2", "A2A_dmso_3", "A2A_dmso_4")], na.rm = T)
+eTAM_data$mean_A2A_stm <-
+    rowMeans(eTAM_data[,c("A2A_stm_1", "A2A_stm_2", "A2A_stm_3", "A2A_stm_4")], na.rm = T)
+
+## Coverage mean
+eTAM_data$mean_cov_dmso <- 
+    rowMeans(eTAM_data[,c("Cov_DMSO_rep1", "Cov_DMSO_rep2", 
+                                 "Cov_DMSO_rep3", "Cov_DMSO_rep4")], na.rm = T)
+eTAM_data$mean_cov_stm <- 
+    rowMeans(eTAM_data[,c("Cov_STM2457_rep1", "Cov_STM2457_rep2", 
+                                 "Cov_STM2457_rep3", "Cov_STM2457_rep4")], na.rm = T)
+
+all_m6A$cov_tt_dmso <- eTAM_data$mean_cov_dmso[match(all_m6A$ID, eTAM_data$ID)]
+all_m6A$A2A_tt_dmso <- eTAM_data$mean_A2A_dmso[match(all_m6A$ID, eTAM_data$ID)]
+all_m6A$A2A_tt_stm <- eTAM_data$mean_A2A_stm[match(all_m6A$ID, eTAM_data$ID)]
+```
+
+```{r}
+## read the A2A ratio in TT eTAM and assign it back to mature RNA m6A sites
+All_m6A <- readRDS("~/Desktop/Data/Julian_lab/Peter/eTAM/TT_eTAM_STM/RDS/All_m6A_new.rds")
+All_m6A$dif_A2A_tt <- All_m6A$A2A_tt_dmso - All_m6A$A2A_tt_stm
+
+m6A_mature$A2A_tt_wt <- All_m6A$A2A_tt_dmso[match(
+    m6A_mature$ID, All_m6A$ID
+)]
+m6A_mature$A2A_tt_stm <- All_m6A$A2A_tt_stm[match(
+    m6A_mature$ID, All_m6A$ID
+)]
+m6A_mature$dif_A2A_tt <- All_m6A$dif_A2A_tt[match(
+    m6A_mature$ID, All_m6A$ID
+)]
+m6A_mature$cov_wt_tt <- All_m6A$cov_tt_dmso[match(
+    m6A_mature$ID, All_m6A$ID
+)]
+
+## Since without enough coverage in TT-eTAM the stoichiometry difference would be not reliable
+## Here we filter for coverage in TT-eTAM before identify different m6A groups 
+m6A_mature$stoi_dif <- m6A_mature$mean_A2A_dmso - m6A_mature$A2A_tt_wt
+m6A_mature$groups <- cut(m6A_mature$stoi_dif, c(-Inf,0,0.1,0.2,0.3,0.4,1))
+
+## keep the mature m6A sites with coverage >= 5 in TT eTAM
+m6A_mature_f <- m6A_mature[which(m6A_mature$cov_wt_tt >= 5)]
+m6A_mature_f <- m6A_assignment_intron_version(m6A_mature_f, hg38)
+
+#####-----------keep the intronic or exonic m6A sites----------###
+m6A_mature_f <- m6A_mature_f[which(m6A_mature_f$type == "exon"),]
+
+####
+
+p <- ggplot(as.data.frame(m6A_mature_f), aes(y = mean_A2A_dmso, x = A2A_tt_wt, color = groups)) + 
+    geom_point(alpha = 0.1) + 
+    geom_abline(linetype = 2) +
+    labs(y = "m6A stoichiometry in mature RNA",
+         x = "m6A stoichiometry in nascent RNA",
+         title = "Plot with m6A sites that detected in mature RNA")  +
+    guides(color = guide_legend(override.aes = list(alpha = 0.5)))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+```{r}
+#| eval: false
+lw <- 0.5
+
+p <- ggplot(as.data.frame(m6A_mature_f), aes(y = mean_A2A_dmso, x = A2A_tt_wt, fill = groups)) + 
+    geom_point(shape = 21, size = 0.2, stroke = 0.05, color = "black") + 
+    geom_abline(linetype = 2) +
+    labs(y = "m6A stoichiometry in mature RNA",
+         x = "m6A stoichiometry in nascent RNA",
+         title = "Plot with m6A sites that detected in mature RNA") +
+  scale_x_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1),
+                     expand = c(0.01, 0.01)) +
+  scale_y_continuous(breaks = seq(0.25, 1, 0.25), limits = c(0.25, 1),
+                     expand = c(0.01, 0.01)) +
+  guides(fill = guide_legend(override.aes = list(size = 2, stroke = 0.3))) +
+  theme_bw(base_size = 6) +
+  theme(
+    text              = element_text(size = 6, family = "Arial"),
+    axis.text         = element_text(size = 6, family = "Arial"),
+    axis.title        = element_text(size = 6, family = "Arial"),
+    plot.title        = element_text(size = 6, face = "bold", family = "Arial"),
+    legend.text       = element_text(size = 6, family = "Arial"),
+    legend.title      = element_text(size = 6, family = "Arial"),
+    panel.border      = element_rect(linewidth = lw, fill = NA, color = "black"),
+    axis.line         = element_blank(),
+    axis.ticks        = element_line(linewidth = lw, color = "black"),
+    axis.ticks.length = unit(1.5, "pt"),
+    panel.grid.major  = element_line(linewidth = lw * 0.5, color = "grey88"),
+    panel.grid.minor  = element_blank(),
+    legend.key.size   = unit(3, "mm"),
+    plot.margin       = margin(3, 3, 3, 3, "mm")
+  )
+
+gt <- ggplotGrob(p)
+pp <- gt$layout[gt$layout$name == "panel", ]
+gt$widths[pp$l]  <- unit(3, "cm")
+gt$heights[pp$t] <- unit(3, "cm")
+
+cairo_pdf("plots/scatter_stoi_mature_vs_nascent_v2.pdf",
+          width  = 8 * 0.3937,
+          height = 7 * 0.3937,
+          family = "Arial")
+grid.newpage()
+grid.draw(gt)
+dev.off()
+```
+
+
+```{r}
+#| eval: false
+
+## scatter version 2
+# ---- 1. Settings -------------------------------------------------------------
+
+infile      <- "stoichiometry_sites.tsv"   # your file
+col_A       <- "stoi_A"                    # column: stoichiometry condition A
+col_B       <- "stoi_B"                    # column: stoichiometry condition B
+cutoff_A    <- 25                          # minimum stoichiometry in A [%]
+font_family <- "Arial"                     # use "Helvetica" on macOS if Arial is missing
+panel_cm    <- 3                           # axis length in cm
+out_prefix  <- "stoi"
+
+# position of the "x % higher in B" label inside the scatter (in % units)
+lab_B_x <- 82
+lab_B_y <- 42
+
+# colours (same as the binned version)
+col_le0  <- "#2B5C6B"   # <= 0   (used for "higher in B")
+col_0_10 <- "#4A9A9A"
+col_10   <- "#A3D5C3"   # +10 line / 10-20 bin
+col_20   <- "#E3A83E"   # +20 line / 20-30 bin
+col_30   <- "#C0632A"   # +30 line / 30-40 bin
+col_40   <- "#8B3A2F"   # +40 line / >40 bin
+bin_cols <- c(col_le0, col_0_10, col_10, col_20, col_30, col_40)
+bin_labs <- c("\u2264 0", "0\u201310", "10\u201320", "20\u201330", "30\u201340", "> 40")
+
+# ---- 2. Unit helpers (ggplot uses mm for text and its own scale for lines) ---
+
+fs  <- 6 / .pt                          # 6 pt text inside geom_text/annotate
+lw  <- function(pt) pt / (.pt * 72.27 / 96)   # line width in pt -> ggplot linewidth
+
+# ---- 4. Common theme ---------------------------------------------------------
+
+theme_panel <- theme_classic(base_size = 6, base_family = font_family) +
+  theme(
+    axis.line         = element_line(linewidth = lw(0.5)),
+    axis.ticks        = element_line(linewidth = lw(0.5)),
+    axis.ticks.length = unit(2, "pt"),
+    axis.text         = element_text(size = 6, colour = "black"),
+    axis.text.x       = element_text(margin = margin(t = 0.5, unit = "pt")),
+    axis.text.y       = element_text(margin = margin(r = 0.5, unit = "pt")),
+    axis.title        = element_text(size = 6),
+    axis.title.x      = element_text(margin = margin(t = 1.5, unit = "pt")),
+    axis.title.y      = element_text(margin = margin(r = 1.5, unit = "pt")),
+    plot.title        = element_text(size = 6, hjust = 0,
+                                     margin = margin(b = 3, unit = "pt")),
+    plot.margin       = margin(12, 8, 3, 3, unit = "pt"),
+    legend.position   = "none"
+  )
+
+# fix the panel (axis area) to an exact size and save with the matching canvas
+save_fixed <- function(p, file, w_cm = panel_cm, h_cm = panel_cm) {
+  g  <- ggplotGrob(p)
+  pn <- g$layout[g$layout$name == "panel", ]
+  g$widths[pn$l]  <- unit(w_cm, "cm")
+  g$heights[pn$t] <- unit(h_cm, "cm")
+  W <- convertWidth(sum(g$widths),   "cm", valueOnly = TRUE)
+  H <- convertHeight(sum(g$heights), "cm", valueOnly = TRUE)
+  ggsave(file, g, width = W, height = H, units = "cm", device = cairo_pdf)
+  ggsave(sub("\\.pdf$", ".png", file), g, width = W, height = H,
+         units = "cm", dpi = 600)
+  message(sprintf("%s: %.2f x %.2f cm", file, W, H))
+}
+
+# ---- 5. Scatter A vs B with dashed coloured guide lines ----------------------
+
+guides <- tibble(
+  k     = c(0, 10, 20, 30, 40),
+  lab   = c("\u00b10", "+10", "+20", "+30", "+40"),
+  col   = c("black", col_10, col_20, col_30, col_40),
+  x0    = 0, y0 = k, x1 = 100 - k, y1 = 100
+)
+
+n_sites <- length(m6A_mature_f)
+pct_A   <- round(100 * mean(m6A_mature_f$stoi_dif > 0))
+pct_B   <- round(100 * mean(m6A_mature_f$stoi_dif <= 0))
+med     <- median(m6A_mature_f$stoi_dif*100)
+
+p_scatter <- ggplot(as.data.frame(m6A_mature_f), aes(y = mean_A2A_dmso*100, x = A2A_tt_wt*100)) +
+  annotate("rect", xmin = 0, xmax = 100, ymin = 0, ymax = cutoff_A,
+           fill = "#f6f6f6") +
+  annotate("text", x = 97, y = cutoff_A / 2,
+           label = paste0("minimum stoichiometry\nin A set to ", cutoff_A, " %"),
+           hjust = 1, size = fs, colour = "#b0b0b0", lineheight = 0.9,
+           family = font_family) +
+  ggrastr::rasterise(
+      geom_point(size = 0.15, stroke = 0, colour = "#444444", alpha = 0.3), dpi = 600) +
+  # guide lines: +10 ... +40 dashed and coloured, diagonal solid black
+  geom_segment(data = filter(guides, k > 0),
+               aes(x = x0, y = y0, xend = x1, yend = y1, colour = col),
+               linewidth = lw(0.5), linetype = "32", inherit.aes = FALSE) +
+  geom_segment(data = filter(guides, k == 0),
+               aes(x = x0, y = y0, xend = x1, yend = y1),
+               colour = "black", linewidth = lw(0.6), inherit.aes = FALSE) +
+  geom_text(data = guides,
+            aes(x = x1 + 1.5, y = y1 + 1.5, label = lab, colour = col),
+            angle = 45, hjust = 0, vjust = 0, size = fs,
+            family = font_family, inherit.aes = FALSE) +
+  scale_colour_identity() +
+  # label for sites below the diagonal
+  annotate("text", x = lab_B_x, y = lab_B_y,
+           label = paste0(pct_B, " % higher\nin B"),
+           size = fs, colour = col_le0, lineheight = 0.9,
+           family = font_family) +
+  scale_x_continuous(breaks = seq(0, 100, 25), expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 100, 25), expand = c(0, 0)) +
+  coord_cartesian(xlim = c(0, 100), ylim = c(0, 100), clip = "off") +
+  labs(x = "Stoichiometry in TT-eTAM [%]", y = "Stoichiometry eTAM [%]",
+       title = paste0(pct_A, " % higher in A")) +
+  theme_panel
+
+save_fixed(p_scatter, "plots/stoi_scatter_dashed.pdf")
+
+# ---- 6. Histogram of delta (2 pp bins, coloured by delta bin) ----------------
+
+bw     <- 2
+brks   <- seq(floor(min(m6A_mature_f$stoi_dif*100, na.rm = T) / bw) * bw,
+              ceiling(max(m6A_mature_f$stoi_dif*100, na.rm = T) / bw) * bw, by = bw)
+h      <- hist(m6A_mature_f$stoi_dif*100, breaks = brks, right = TRUE, plot = FALSE)
+
+hist_df <- tibble(mid = h$mids, n = h$counts) %>%
+  mutate(bin = cut(mid, c(-Inf, 0, 10, 20, 30, 40, Inf),
+                   labels = bin_labs, right = TRUE))
+
+ymax <- max(hist_df$n) / 1000 * 1.05
+
+p_hist <- ggplot(hist_df, aes(mid, n / 1000, fill = bin)) +
+  geom_col(width = bw, colour = "white", linewidth = lw(0.15)) +
+  geom_vline(xintercept = 0,   colour = "black", linewidth = lw(0.6)) +
+  geom_vline(xintercept = med, colour = "black", linewidth = lw(0.5),
+             linetype = "42") +
+  annotate("text", x = med + 1.5, y = ymax,
+           label = paste0("median +", round(med), " pp"),
+           hjust = 0, vjust = 1, size = fs, family = font_family) +
+  # share below zero, left of the zero line
+  annotate("text", x = -1.5, y = ymax,
+           label = paste0(pct_B, " %\nhigher\nin B"),
+           hjust = 1, vjust = 1, size = fs, colour = col_le0,
+           lineheight = 0.9, family = font_family) +
+  scale_fill_manual(values = setNames(bin_cols, bin_labs)) +
+  scale_x_continuous(breaks = seq(-100, 100, 20), expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  coord_cartesian(ylim = c(0, ymax), clip = "off") +
+  labs(x = "\u0394 stoichiometry A \u2212 B [pp]", y = "Sites (\u00d7 1,000)",
+       title = paste0(pct_A, " % higher in A")) +
+  theme_panel
+
+save_fixed(p_hist, "plots/stoi_dif_hist_delta.pdf")
+```
+
+
+```{r}
+m6A_mature_f$ratio_stoi <- m6A_mature_f$A2A_tt_wt/m6A_mature_f$mean_A2A_dmso
+p <- ggplot(as.data.frame(m6A_mature_f), aes(x = ratio_stoi)) + 
+    geom_density() +
+    labs(x = "Stoichiometry ratio (nascent/mature)",
+         title = "Plot with m6A sites that detected in mature RNA")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)hist_df
+
+```
+
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), aes(x = ratio_stoi)) + 
+    stat_ecdf() +
+    labs(y = "Accumulated fraction",
+         x = "Stoichiometry ratio (nascent/mature)",
+         title = "Plot with m6A sites that detected in mature RNA") +
+    geom_hline(yintercept = 0.5, linetype = 2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Number of m6A in different groups
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, label = ..count..)) + 
+    geom_bar() +
+    geom_label(stat = "count") + 
+    labs(x = "m6A stoichiometry changes (mature - nascent)")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Distance to SS for m6A in different groups
+
+::: panel-tabset
+## Density plot
+
+```{r}
+m6A_mature_f <- metaGeneProfile(m6A_mature_f,
+    "~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")[[1]]
+m6A_mature_f <- dis_to_SS(m6A_mature_f, hg38) %>%
+    suppressWarnings(.)
+
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = log2(dis_SS), color = groups)) + 
+    geom_density() + 
+    labs(x = "log2(distance to splice site)",
+         color = "m6A groups") + 
+    geom_vline(xintercept = c(log2(100), log2(200)), linetype = 2) +
+    coord_cartesian(ylim = c(0, 0.3))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## ECDF
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = log2(dis_SS), color = groups)) + 
+    ggrastr::rasterise(stat_ecdf(), dpi = 400) + 
+    labs(x = "log2(distance to splice site)",
+         color = "m6A groups",
+         y = "Accumulated fraction") + 
+    geom_vline(xintercept = c(log2(100), log2(200)), linetype = 2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+## m6A Stoichiometry in mature and nascent RNA for different groups
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(y = A2A_tt_wt, x = groups)) +
+    geom_boxplot() + 
+    labs(y = "Stoi in nascent RNA", x = "m6A stoichiometry difference mature - nascent RNA") + 
+    coord_cartesian(ylim = c(0,1))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(y = mean_A2A_dmso, x = groups)) +
+    geom_boxplot() + 
+    labs(y = "Stoi in mature RNA", x = "m6A stoichiometry difference mature - nascent RNA") + 
+    coord_cartesian(ylim = c(0,1))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+# Factors which facilitates early m6A deposition
+
+## Chromatin accessibility
+
+To check the link between chromatin accessibility and m6A deposition here we used the ATACseq data
+and DNase-seq data from `GSE108513`.
+
+```{r}
+#| eval: false
+#| include: true
+
+ch <- rtracklayer::import.chain("hg19ToHg38.over.chain")
+## ATAC
+tmp <- import.bw("~/Desktop/Data/GEO/ATAC_DNase_hek_GSE108513/GSM2902628_HEK293_ATAC_medium_depth_bio1_tech1.bw")
+tmp <- unlist(liftOver(tmp, ch))
+
+## make rle
+tmp <- coverage(tmp, weight = "score")
+
+m6A_mature_f$ATAC <- as.matrix(tmp[m6A_mature_f+10]) %>% rowSums(.)
+
+## DNase
+tmp <- import.bw("~/Desktop/Data/GEO/ATAC_DNase_hek_GSE108513/GSM2902639_HEK293_DNase.bw")
+tmp <- unlist(liftOver(tmp, ch))
+
+## make rle
+tmp <- coverage(tmp, weight = "score")
+
+m6A_mature_f$DNase <- as.matrix(tmp[m6A_mature_f+10]) %>% rowSums(., na.rm = T)
+
+saveRDS(m6A_mature_f, "rds/m6A_mature_f_with_chr_accessibility.rds")
+```
+
+### ATAC
+
+```{r}
+m6A_mature_f <- readRDS("rds/m6A_mature_f_with_chr_accessibility.rds")
+
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, y = ATAC)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "ATAC-seq signal", x = NULL) +
+    coord_cartesian(ylim = c(0,0.12))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(color = groups, x = ATAC)) + 
+    stat_ecdf() + 
+    labs(x = "DNase-seq signal", y = "Accumulated fraction") +
+    coord_cartesian(xlim = c(0,0.25))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+
+### DNase-seq
+
+```{R}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, y = DNase)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "DNase-seq signal", x = NULL) +
+    coord_cartesian(ylim = c(0,0.12))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{R}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(color = groups, x = DNase)) + 
+    stat_ecdf() + 
+    labs(x = "DNase-seq signal", y = "Accumulated fraction") +
+    coord_cartesian(xlim = c(0,0.25))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## RNA secondary structure
+
+To get the accessibility of m6A sites in different group, I run the Viennarna RNAfold with following
+code.
+
+``` ruby
+source ~/.bashrc
+conda activate rna_access
+
+set -euo pipefail
+FASTA=/home/yoz88dx/data/Fasta/m6A_groups/m6A_seq_201.fasta                     # multi‑FASTA with 201‑nt sequences
+OUT=accessibility_m6A_groups.csv
+
+###############################################################################
+# 1. run everything in a disposable work directory so files don’t clutter cwd
+###############################################################################
+WORK=$(mktemp -d)
+cp "$FASTA" "$WORK/in.fa"
+(
+  cd "$WORK" || exit 1
+
+  # --- single RNAplfold run for all records -------------------------------
+  RNAplfold -W 201 -L 200 -u 1 < in.fa >/dev/null
+)
+
+###############################################################################
+# 2. parse each *_lunp (new) or *_unpaired (old) file for Pu(101)
+###############################################################################
+echo "id,P_unpaired_center" > "$OUT"
+
+for FILE in "$WORK"/*_lunp "$WORK"/*_unpaired; do
+  [[ -e "$FILE" ]] || continue               # skip unmatched glob
+  ID=${FILE##*/}; ID=${ID%_*}                # strip path & suffix
+
+  # pick the number where first field == 101  -->  second field
+  Pu=$(awk '$1==101 {print $2; exit}' "$FILE")
+
+  echo "$ID,$Pu" >> "$OUT"
+done
+
+rm -rf "$WORK"
+```
+
+```{r}
+## make fa file
+m6A_mature_f$seq201 <- getSeq(Hsapiens, m6A_mature_f+100)
+m6A_mature_f$ID2 <- paste0("Sites", 1:length(m6A_mature_f))
+names(m6A_mature_f$seq201) <- m6A_mature_f$ID2
+
+writeXStringSet(m6A_mature_f$seq201, filepath = "m6A_seq_201.fasta", format = "fasta")
+```
+
+As shown, the secondary structure/unpaired probability seems to play a role in these m6A groups.
+
+### Boxplot
+
+```{r}
+rna_access <- read.csv("accessibility_m6A_groups.csv")
+m6A_mature_f$rna_access <- rna_access$P_unpaired_center[
+    match(m6A_mature_f$ID2, rna_access$id)
+]
+
+p <- ggplot(as.data.frame(m6A_mature_f), aes(x = groups, y = rna_access)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "Unpaired probability")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+### ECDF
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), aes(color = groups, x = rna_access)) + 
+    stat_ecdf()+ 
+    labs(x = "Unpaired probability", y = "Accumulated fraction")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Histone marks
+
+Here we used the ChIP-seq data for H3K36me3 from `GSE151296` and ChIP-seq data fro H3K3me3 from
+`GSM3715314` to check the link between m6A deposition and histone markers.
+
+### H3K36me3
+
+```{r}
+H3K_chip <- 
+    import.bw("~/Desktop/Data/GEO/ChIP_H3K36me3_GSE151296/GSE151296_wt_merged.h3k36me3.rpm.bw",
+              as = "RleList")
+m6A_mature_f$H3K36me3_1 <- as.matrix(H3K_chip[m6A_mature_f+10]) %>% rowSums(.)
+remove(H3K_chip)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, y = H3K36me3_1)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "H3K36me3 ChIP-seq signal (RPM)", x = NULL) +
+    coord_cartesian(ylim = c(0,25))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+### H3K4me3
+
+```{r}
+tmp <- import.bed("~/Desktop/Data/GEO/ChIP_H3K4me3_GSM3715314/GSM3715314_H3K4me3_CT_peaks.bed")
+
+m6A_mature_f$H3K4me3 <- m6A_mature_f %over% tmp 
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, fill = H3K4me3)) + 
+    geom_bar(position = "fill") +
+    labs(y = "Fraction", title = paste0("Peaks from H3K4me3: ", length(tmp)))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f), 
+       aes(x = groups, fill = H3K4me3)) + 
+    geom_bar(position = "fill") +
+    labs(y = "Fraction", title = paste0("Peaks from H3K4me3: ", length(tmp))) + 
+    coord_cartesian(ylim = c(0,0.15))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+# The coverage of transcripts in TT-eTAM and mature eTAM
+
+```{r}
+TPM_RNAseq <- read_csv("~/Desktop/Data/Julian_lab/Peter/RNAseq/DC1_DDX6_SRSF7/DE_DESeq2/YTHDC1/sizeFactors.allGenes/allSamples.TPM.csv")
+TPM_RNAseq <- TPM_RNAseq[!grepl("ERCC", TPM_RNAseq$gene_id),]
+TPM_RNAseq <- TPM_RNAseq %>%
+  mutate(mean_siControl_DMSO_TPM =
+           rowMeans(across(matches("siControl_DMSO_.*\\.TPM$")), na.rm = TRUE))
+
+m6A_number_tt <- m6A_tt %>% as.data.frame(.) %>%
+    group_by(gene_id) %>% summarise(number = n())
+m6A_number_mature <- m6A_mature %>% as.data.frame(.) %>%
+    group_by(Gene_ID) %>% summarise(number = n())
+
+# df <- data.frame(m6A_number = m6A_number_tt$number,
+#                  gene_id = m6A_number_tt$gene_id,
+#                  group = "TT-eTAM")
+# df2 <- data.frame(m6A_number = m6A_number_mature$number,
+#                  gene_id = m6A_number_mature$Gene_ID,
+#                  group = "mature-eTAM")
+# df <- rbind(df, df2)
+# df$TPM <- TPM_RNAseq$mean_siControl_DMSO_TPM[match(df$gene_id, TPM_RNAseq$gene_id)]
+
+TPM_RNAseq_2 <- TPM_RNAseq
+
+TPM_RNAseq$group <- "TT-eTAM"
+TPM_RNAseq$with_m6A <- TPM_RNAseq$gene_id %in% m6A_tt$gene_id
+TPM_RNAseq$m6A_number <- m6A_number_tt$number[match(TPM_RNAseq$gene_id,
+                                                    m6A_number_tt$gene_id)]
+
+TPM_RNAseq_2$group <- "mature-eTAM"
+TPM_RNAseq_2$with_m6A <- TPM_RNAseq_2$gene_id %in% m6A_mature$Gene_ID
+TPM_RNAseq_2$m6A_number <- m6A_number_mature$number[match(TPM_RNAseq_2$gene_id,
+                                                    m6A_number_tt$gene_id)]
+
+df <- rbind(TPM_RNAseq, TPM_RNAseq_2)
+df <- df[df$mean_siControl_DMSO_TPM > 1,]
+
+p <- ggplot(df, aes(x = group, y = log2(mean_siControl_DMSO_TPM), fill = with_m6A)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,11)) + 
+    labs(y = "log2(TPM)", x = NULL)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+# The m6A sites with high stoichiometry in nascent 
+Here I split the m6A sites based on their stoichiometry in nascent.
+
+:::panel-tabset
+
+## RNA secondary structure
+
+```{r}
+m6A_mature_f$bin_nascent_stoi <- cut(m6A_mature_f$A2A_tt_wt, breaks = seq(0,1,0.2))
+
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$bin_nascent_stoi)]), 
+       aes(x = bin_nascent_stoi, y = rna_access)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "Unpaired probability", x = "Stoichiometry in TT-eTAM")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## H3K36me3
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$bin_nascent_stoi)]), 
+       aes(x = bin_nascent_stoi, y = H3K36me3_1)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "H3K36me3 ChIP-seq signal (RPM)", x = "Stoichiometry in TT-eTAM") +
+    coord_cartesian(ylim = c(0,20))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## DNase-seq
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$bin_nascent_stoi)]), 
+       aes(x = bin_nascent_stoi, y = DNase)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(y = "DNase-seq signal", x = "Stoichiometry in TT-eTAM") +
+    coord_cartesian(ylim = c(0,0.1))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Intron half lives
+
+```{r}
+intron_hl <- readRDS("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/04 Splicing speed and nuclear residence time/rds/gr_intron_HLs_3_timepoint_3_reps.rds")
+
+## Filter for rmse to keep the high confidence result
+intron_hl <- intron_hl[intron_hl$weighted_rmse < 0.1]
+intron_hl <- intron_hl[intron_hl$half_life_min < max(intron_hl$half_life_min)]
+
+m6A_mature_f$test_start <- m6A_mature_f$exon_start
+
+m6A_mature_f$test_end <- m6A_mature_f$exon_end
+
+## start
+test_start <- data.frame(ID = m6A_mature_f$ID,
+                         chr = seqnames(m6A_mature_f),
+                         start = m6A_mature_f$test_start,
+                         end = m6A_mature_f$test_start,
+                         strand = strand(m6A_mature_f)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+test_start$hl_SS <- intron_hl$half_life_min[
+    findOverlaps((test_start+10), intron_hl, select = "first")]
+
+## end
+test_end <- data.frame(ID = m6A_mature_f$ID,
+                         chr = seqnames(m6A_mature_f),
+                         start = m6A_mature_f$test_end,
+                         end = m6A_mature_f$test_end,
+                         strand = strand(m6A_mature_f)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+## load splicing speed data
+test_end$hl_SS <- intron_hl$half_life_min[
+    findOverlaps((test_end+10), intron_hl, select = "first")]
+
+m6A_mature_f$hl_SS_start <- test_start$hl_SS[
+    match(m6A_mature_f$ID, test_start$ID)
+]
+m6A_mature_f$hl_SS_end <- test_end$hl_SS[
+    match(m6A_mature_f$ID, test_end$ID)
+]
+
+m6A_mature_f$hl_SS_mean <- rowMeans(mcols(m6A_mature_f)[, c("hl_SS_start", "hl_SS_end")] %>%
+                                          as.data.frame(.),
+                                      na.rm = T)
+
+p <- ggplot(as.data.frame(m6A_mature_f[!is.na(m6A_mature_f$bin_nascent_stoi)]), 
+       aes(x = bin_nascent_stoi, y = hl_SS_mean)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(0,40)) + 
+    labs(y = "The intron half lives of surrounding introns (mean value)",
+         x = "Stoichiometry in TT_eTAM")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+:::
+
+# m6A distribution in groups
+
+```{r}
+m6A_mature_f$Position[m6A_mature_f$location == "CDS"] <- 
+    m6A_mature_f$Position[m6A_mature_f$location == "CDS"] + 1
+m6A_mature_f$Position[m6A_mature_f$location == "UTR3"] <- 
+    m6A_mature_f$Position[m6A_mature_f$location == "UTR3"] + 2
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[m6A_mature_f$location != "NO"]), 
+       aes(x = Position, color = groups)) +
+    geom_density(fill = "white", alpha= 0.05)  +
+    ggtitle("Metagene profile") +
+    geom_vline(xintercept=c(1,2), linetype=2, color="cornflowerblue") +
+    scale_x_continuous(breaks = c(0.5,1.5,2.5),
+                       labels = c("5'UTR","CDS","3'UTR"))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(as.data.frame(m6A_mature_f[m6A_mature_f$location != "NO"]), 
+       aes(fill = location, x = groups)) + 
+    geom_bar(position = "fill") + 
+    labs(y = "Accumulated fraction", x = "Difference of stoichiometry (mature - nascent)")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+# Nascent to mature ratio
+
+```{r}
+m6A_mature_f$nascent_mature_ratio <- m6A_mature_f$A2A_tt_wt/m6A_mature_f$mean_A2A_dmso
+
+p <- ggplot(as.data.frame(m6A_mature_f),
+       aes(x = nascent_mature_ratio)) + 
+    stat_ecdf() + 
+    geom_vline(xintercept = median(m6A_mature_f$nascent_mature_ratio), linetype = 2) +
+    labs(y= "Accumulated fraction", x = "Nascent to mature m6A stoichiometry ratio",
+         title = "The dash line represents median value") + 
+    scale_x_continuous(breaks = c(0,0.5,round(median(m6A_mature_f$nascent_mature_ratio),3), 1,1.5,2),
+                       labels = c(0,0.5,round(median(m6A_mature_f$nascent_mature_ratio),3), 1,1.5,2))
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+# Supplement table for m6A sites
+
+```{r}
+## mature
+m6A_mature_df <- as.data.frame(m6A_mature)
+m6A_mature_df$Stoichiometry <- m6A_mature_df$mean_A2A_dmso
+m6A_mature_df <- m6A_mature_df[,c(1,2,3,4,5,58)]
+
+write.xlsx(m6A_mature_df, "tables/m6A_eTAM_mature.xlsx")
+
+## TT-eTAM
+m6A_tt_df <- as.data.frame(m6A_tt) %>%
+    mutate(Stoichiometry = mean_A2A_dmso,
+           Location = type)
+
+m6A_tt_df <- m6A_tt_df[,c(1:5,57,58,55)]
+write.xlsx(m6A_tt_df, "tables/m6A_TTeTAM_nascent.xlsx")
+```
+

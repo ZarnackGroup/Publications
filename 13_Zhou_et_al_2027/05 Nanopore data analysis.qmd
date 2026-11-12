@@ -1,0 +1,1829 @@
+---
+title: "05 Nanopore data analysis"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Julius-Maximilians-Universität Würzburg
+      affiliation-url: https://www.uni-wuerzburg.de/
+title-block-banner: true
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+execute:
+  echo: false
+  error: false
+  warning: false
+editor: 
+  markdown: 
+    wrap: 100
+---
+
+```{r}
+#| echo: false
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library(eulerr)
+library(ggsignif)
+library(tidyplots)
+library(gt)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/homemade_functions/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+## To make sure the number is in 150000000 format instead of 1.5e+08
+options(scipen = 999)
+
+## set theme skin
+font_szie <- 6
+linesize <- 0.5
+lw <- 0.5
+
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw)))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+update_geom_defaults("abline",   list(color = "#993404", size = linesize))
+
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+basemean <- 10
+pvalue <- 0.05
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")
+DRACN <- "[GAT][GA]AC[ATCG]"
+
+fix_panel_size <- function(p, panel_width = 3, panel_height = 3, unit = "cm") {
+  gt <- ggplotGrob(p)
+  pp <- gt$layout[gt$layout$name == "panel", ]
+
+  gt$widths[pp$l]  <- grid::unit(panel_width, unit)
+  gt$heights[pp$t] <- grid::unit(panel_height, unit)
+
+  gt
+}
+
+panel_width <- 3
+panel_height <- 3
+
+pvalue <- 0.1
+```
+
+# Introduction
+This report collects the code and result for mRNA nanopore data analysis.
+
+---
+
+# Data laoding and processing
+
+
+```{r}
+#| eval: false
+#| include: true
+## m6A
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/filtered_m6A_cov_5/"
+all_f <- list.files(path_f)
+
+for (i in 1:length(all_f)) {
+    if (i == 1) {
+        all_sites <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        all_sites$sample <- sub("HEK293T_mRNA_", "", all_f[[i]]) %>%
+            sub("_filtered_m6A.bed", "", .)
+    } else {
+        tmp <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        tmp$sample <- sub("HEK293T_mRNA_", "", all_f[[i]]) %>%
+            sub("_filtered_m6A.bed", "", .)
+        all_sites <- rbind(all_sites, tmp)
+    }
+}
+
+all_sites <- all_sites %>% mutate(
+    condition = case_when(
+      str_detect(sample, "STM_PlaB1_")        ~ "STM.PlaB.1nM",
+      str_detect(sample, "STM_PlaB10_")       ~ "STM.PlaB.10nM",
+      str_detect(sample, "STM_PlaB100_")      ~ "STM.PlaB.100nM",
+      str_detect(sample, "PlaB100_")          ~ "PlaB.100nM",
+      str_detect(sample, "PlaB10_")           ~ "PlaB.10nM",
+      str_detect(sample, "PlaB1_")            ~ "PlaB.1nM",
+      str_detect(sample, "STM")               ~ "STM",
+      str_detect(sample, "DMSO")              ~ "DMSO",
+      TRUE                                    ~ NA_character_
+    )
+)
+
+all_sites$rep <- sub(".*_", "", all_sites$sample) 
+
+all_sites$m6A <- all_sites$Stoichiometry > 20
+m6A_all <- all_sites[all_sites$m6A == T,] 
+
+## m6A presented in at least two reps as detected m6A sites
+m6A_all$ID_2 <- paste0(m6A_all$ID, "_", m6A_all$condition)
+
+n_id <- table(m6A_all$ID_2) %>% as.data.frame(.)
+n_id$condition <- sub(".*_", "", n_id$Var1)
+n_id$ID <- sub("_.*", "", n_id$Var1)
+## keep ID in more than two replicates
+n_id_f <- n_id[n_id$Freq == 2,]
+
+## function to make m6A GRange object from ID
+make_m6A_gr_mRNA <- function(ID, info){
+    ## make coordinate df
+    df <- data.frame(seqnames = sub(":.*", "", ID$ID),
+                     start = getstr(ID$ID, ":", 1, " ", 1),
+                     end = getstr(ID$ID, ":", 1, " ", 1),
+                     strand = sub(".* ", "", ID$ID),
+                     ID = ID$ID,
+                     condition = ID$condition)
+    test_rep <- c("Rep1", "Rep2")
+    unique_condition <- unique(ID$condition)
+    ## assign information
+    for (i in 1:length(unique_condition)) {
+    used_info <- info[info$condition == unique_condition[[i]],]
+    
+    ## loop through all reps
+
+    
+    for (i in seq_len(length(test_rep))) {
+        tmp_info <- used_info[used_info$rep == test_rep[[i]],]
+        ## new column names
+        name1 <- paste0(unique(tmp_info$condition), "_", unique(tmp_info$rep), "_", "N_cov")
+        name2 <- paste0(unique(tmp_info$condition), "_", unique(tmp_info$rep), "_", "stoi")
+        
+        ## assign value
+        df[[name1]] <- tmp_info$N_valid_cov[match(
+            df$ID, tmp_info$ID
+        )]
+        df[[name2]] <- tmp_info$Stoichiometry[match(
+            df$ID, tmp_info$ID
+        )]
+    }
+    }
+    out <- makeGRangesFromDataFrame(df, keep.extra.columns = T)
+    return(out)
+}
+
+## make m6A 
+m6A_all <- make_m6A_gr_mRNA(n_id_f, all_sites)
+
+## calculate mean
+m6A_all <- as.data.frame(m6A_all) %>%
+  mutate(
+    DMSO_mean_cov = rowMeans(across(matches("^DMSO_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    DMSO_mean_stoi = rowMeans(across(matches("^DMSO_Rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    PlaB.1nM_mean_cov = rowMeans(across(matches("^PlaB.1nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    PlaB.1nM_mean_stoi = rowMeans(across(matches("^PlaB.1nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+    
+    PlaB.10nM_mean_cov = rowMeans(across(matches("^PlaB.10nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    PlaB.10nM_mean_stoi = rowMeans(across(matches("^PlaB.10nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+    
+    PlaB.100nM_mean_cov = rowMeans(across(matches("^PlaB.100nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    PlaB.100nM_mean_stoi = rowMeans(across(matches("^PlaB.100nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    STM.PlaB.1nM_mean_cov = rowMeans(across(matches("^STM.PlaB.1nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    STM.PlaB.1nM_mean_stoi = rowMeans(across(matches("^STM.PlaB.1nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+    
+    STM.PlaB.10nM_mean_cov = rowMeans(across(matches("^STM.PlaB.10nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    STM.PlaB.10nM_mean_stoi = rowMeans(across(matches("^STM.PlaB.10nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+    
+    STM.PlaB.100nM_mean_cov = rowMeans(across(matches("^STM.PlaB.100nM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    STM.PlaB.100nM_mean_stoi = rowMeans(across(matches("^STM.PlaB.100nM_Rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    STM_mean_cov = rowMeans(across(matches("^STM_Rep[0-9]+_N_cov$")), na.rm = TRUE),
+    STM_mean_stoi = rowMeans(across(matches("^STM_Rep[0-9]+_stoi$")), na.rm = TRUE)
+  ) %>%
+  mutate(
+    across(
+      ends_with(c("_mean_cov", "_mean_stoi")),
+      ~ replace(.x, is.nan(.x), NA_real_)
+    )
+  )
+
+m6A_all <- m6A_all[order(m6A_all$condition),]
+m6A_all <- makeGRangesFromDataFrame(m6A_all, keep.extra.columns = T)
+
+m6A_all$Stoichiometry <- 
+    case_when(m6A_all$condition == "DMSO" ~ m6A_all$DMSO_mean_stoi,
+             m6A_all$condition == "STM" ~ m6A_all$STM_mean_stoi,
+             m6A_all$condition == "PlaB.1nM" ~ m6A_all$PlaB.1nM_mean_stoi,
+             m6A_all$condition == "PlaB.10nM" ~ m6A_all$PlaB.10nM_mean_stoi,
+             m6A_all$condition == "PlaB.100nM" ~ m6A_all$PlaB.100nM_mean_stoi,
+             m6A_all$condition == "STM.PlaB.1nM" ~ m6A_all$STM.PlaB.1nM_mean_stoi,
+             m6A_all$condition == "STM.PlaB.10nM" ~ m6A_all$STM.PlaB.10nM_mean_stoi,
+             m6A_all$condition == "STM.PlaB.100nM" ~ m6A_all$STM.PlaB.100nM_mean_stoi)
+m6A_all_mRNA <- m6A_all[seqnames(m6A_all) %in% standardChromosomes(m6A_all)]
+m6A_all_mRNA$condition_RNA <- paste0(m6A_all_mRNA$condition, "_mRNA")
+saveRDS(m6A_all_mRNA, "rds/m6A_mRNA_nanopore.rds")
+```
+
+```{r}
+#| eval: false
+#| include: true
+## IRratio
+IRratio <- 
+    IRTracker_estimation(hg38, "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/coverage/",
+                         Retainable = F)
+saveRDS(IRratio, "rds/IRratio_all_introns_mRNA_nanopore.rds")
+```
+
+# QC
+
+## Mapped read number
+
+```{r}
+df_n <- read.table("~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/mapped_read_counts.tsv",
+                   header = T)
+df_n <- df_n[-5,]
+df_n$sample <- sub("HEK293T_mRNA_", "", df_n$sample) %>%
+    sub(".sorted", "", .)
+df_n$sample <- sub("HEK293T_", "", df_n$sample) %>%
+    sub(".sorted", "", .)
+
+
+ggplot(df_n, aes(x = sample, y = mapped_reads, label = mapped_reads)) + 
+    geom_col(position = "dodge") + 
+    geom_label(position = position_dodge(width = 0.9), show.legend = F)  + 
+    theme(axis.text.x = element_text(angle = 90)) + 
+    labs(x = NULL)
+```
+
+## PolyA length
+
+```{r}
+#| eval: false
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/polyA_length_mapped/"
+all_f <- list.files(path_f)[-6]
+
+for (i in 1:length(all_f)) {
+    if (i == 1) {
+        df <- read.table(paste0(path_f, all_f[[i]]),
+                         header = T)
+        df$sample <- sub(".sorted.bam.polyA_length.valid.tsv", "", all_f[[i]]) %>%
+            sub("HEK293T_mRNA_", "", .) %>%
+            sub("HEK293T_", "", .)
+    } else {
+        tmp <- read.table(paste0(path_f, all_f[[i]]),
+                         header = T)
+        tmp$sample <- sub(".sorted.bam.polyA_length.valid.tsv", "", all_f[[i]])  %>%
+            sub("HEK293T_mRNA_", "", .) %>%
+            sub("HEK293T_", "", .)
+        df <- rbind(df, tmp)
+    }
+}
+
+
+
+ggplot(df, aes(x = sample, y = log2(polyA_length))) + 
+    geom_boxplot(outlier.shape = NA) + 
+    geom_hline(yintercept = c(log2(20), log2(70)), linetype = 2) +
+    theme(axis.text.x = element_text(angle = 45))
+```
+
+# IRratio changes and candidate IR table generation
+
+```{r}
+IRratio_mRNA <- readRDS("rds/IRratio_all_introns_mRNA_nanopore.rds")
+IRratio_mRNA$Sample <- sub("HEK293T_mRNA_", "", IRratio_mRNA$Sample) %>%
+    sub(".sorted.1nt.bw", "", .)
+
+IRratio_mRNA$rep <- sub(".*_", "", IRratio_mRNA$Sample)
+IRratio_mRNA <- IRratio_mRNA %>% mutate(
+    condition = case_when(
+      str_detect(Sample, "STM_PlaB1_")        ~ "STM.PlaB.1nM",
+      str_detect(Sample, "STM_PlaB10_")       ~ "STM.PlaB.10nM",
+      str_detect(Sample, "STM_PlaB100_")      ~ "STM.PlaB.100nM",
+      str_detect(Sample, "PlaB100_")          ~ "PlaB.100nM",
+      str_detect(Sample, "PlaB10_")           ~ "PlaB.10nM",
+      str_detect(Sample, "PlaB1_")            ~ "PlaB.1nM",
+      str_detect(Sample, "STM")               ~ "STM",
+      str_detect(Sample, "DMSO")              ~ "DMSO",
+      TRUE                                    ~ NA_character_
+    )
+)
+
+## make differential IR result
+intronDepth <- 1
+AveExpr <- 0.2
+SSratio <- 1.2
+maxExon_expression <- 10
+## get IR result
+## PlaB STM
+ir_PlaB.1nM_STM.PlaB.1nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("PlaB.1nM", "STM.PlaB.1nM"), n_rep = 4) %>%
+    mutate(comparison = "PlaB.1nM_vs_STM.PlaB.1nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+
+ir_PlaB.10nM_STM.PlaB.10nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("PlaB.10nM", "STM.PlaB.10nM"), n_rep = 4) %>%
+    mutate(comparison = "PlaB.10nM_vs_STM.PlaB.10nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+
+ir_PlaB.100nM_STM.PlaB.100nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("PlaB.100nM", "STM.PlaB.100nM"), n_rep = 4) %>%
+    mutate(comparison = "PlaB.100nM_vs_STM.PlaB.100nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+
+## PlaB
+ir_DMSO_PlaB.1nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("DMSO", "PlaB.1nM"), n_rep = 4) %>%
+    mutate(comparison = "DMSO_vs_PlaB.1nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+ir_DMSO_PlaB.10nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("DMSO", "PlaB.10nM"), n_rep = 4) %>%
+    mutate(comparison = "DMSO_vs_PlaB.10nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+ir_DMSO_PlaB.100nM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("DMSO", "PlaB.100nM"), n_rep = 4) %>%
+    mutate(comparison = "DMSO_vs_PlaB.100nM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+
+## STM
+ir_DMSO_STM <- 
+    make_IR_comparison(IRratio_mRNA, intronDepth = intronDepth, SSratio = SSratio, 
+                       AveExpr = AveExpr, maxExon_expression = maxExon_expression,
+                       condition = c("DMSO", "STM"), n_rep = 4) %>%
+    mutate(comparison = "DMSO_vs_STM") %>%
+    filter(delta_IR_lm <= 1 & delta_IR_lm >= -1)
+```
+
+## IRratio changes upon STM in PlaB and DMSO condtion
+
+:::panel-tabset
+
+## PlaB 1nM
+
+
+:::panel-tabset
+
+## MA PlaB (Fig 6B)
+
+```{r}
+ir_DMSO_PlaB.1nM$bin_dPSI_plab <- 
+    cut(ir_DMSO_PlaB.1nM$delta_IR_lm, breaks = c(-Inf, 0, 0.2, 0.3,Inf))
+
+p <- ggplot(as.data.frame(ir_DMSO_PlaB.1nM),
+       aes(y = delta_IR_lm, x = log2(maxExon_expression), color = bin_dPSI_plab)) + 
+    ggrastr::rasterize(geom_point(size = 0.3, stroke = 0.05), dpi = 500) +
+    geom_hline(yintercept = 0, linetype = 2)
+
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in PlaB (Fig 6D)
+
+```{r}
+ir_PlaB.1nM_STM.PlaB.1nM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.1nM$bin_dPSI_plab[match(ir_PlaB.1nM_STM.PlaB.1nM$Intron_ID,
+                                         ir_DMSO_PlaB.1nM$Intron_ID)]
+
+p1 <- ggplot(ir_PlaB.1nM_STM.PlaB.1nM[!is.na(ir_PlaB.1nM_STM.PlaB.1nM$bin_dPSI_plab),], 
+             aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma DMSO vs STM") + 
+    geom_vline(xintercept = 0, linetype = 2) 
+
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in DMSO (Fig 6E)
+
+```{r}
+ir_DMSO_STM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.1nM$bin_dPSI_plab[match(ir_DMSO_STM$Intron_ID,
+                                         ir_DMSO_PlaB.1nM$Intron_ID)]
+
+p1 <- ggplot(ir_DMSO_STM[!is.na(ir_DMSO_STM$bin_dPSI_plab),], 
+             aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma DMSO vs STM") + 
+    geom_vline(xintercept = 0, linetype = 2) 
+
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+## PlaB 10nM
+
+:::panel-tabset
+
+## MA PlaB (Fig 6B)
+
+```{r}
+ir_DMSO_PlaB.10nM$bin_dPSI_plab <- 
+    cut(ir_DMSO_PlaB.10nM$delta_IR_lm, breaks = c(-Inf, 0, 0.2, 0.3,Inf))
+
+p <- ggplot(as.data.frame(ir_DMSO_PlaB.10nM),
+       aes(y = delta_IR_lm, x = log2(maxExon_expression), color = bin_dPSI_plab)) + 
+    ggrastr::rasterize(geom_point(size = 0.3, stroke = 0.05), dpi = 500) +
+    geom_hline(yintercept = 0, linetype = 2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in PlaB (Fig S6A)
+
+```{r}
+ir_PlaB.10nM_STM.PlaB.10nM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.10nM$bin_dPSI_plab[match(ir_PlaB.10nM_STM.PlaB.10nM$Intron_ID,
+                                         ir_DMSO_PlaB.10nM$Intron_ID)]
+
+p1 <- ggplot(ir_PlaB.10nM_STM.PlaB.10nM[!is.na(ir_PlaB.10nM_STM.PlaB.10nM$bin_dPSI_plab),], 
+             aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma DMSO vs STM") + 
+    geom_vline(xintercept = 0, linetype = 2) 
+
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in DMSO (Fig S6C)
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4
+ir_DMSO_STM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.10nM$bin_dPSI_plab[match(ir_DMSO_STM$Intron_ID,
+                                         ir_DMSO_PlaB.10nM$Intron_ID)]
+
+p1 <- ggplot(ir_DMSO_STM[!is.na(ir_DMSO_STM$bin_dPSI_plab),], 
+             aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma DMSO vs STM") + 
+    geom_vline(xintercept = 0, linetype = 2) 
+
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+:::
+
+## PlaB 100nM
+
+:::panel-tabset
+
+## MA PlaB (Fig 6B)
+
+```{r}
+ir_DMSO_PlaB.100nM$bin_dPSI_plab <- 
+    cut(ir_DMSO_PlaB.100nM$delta_IR_lm, breaks = c(-Inf, 0, 0.2, 0.3,Inf))
+
+p <- ggplot(as.data.frame(ir_DMSO_PlaB.100nM),
+       aes(x = delta_IR_lm, y = -log10(adj.P.Val), color = bin_dPSI_plab)) + 
+    ggrastr::rasterize(geom_point(size = 0.3, stroke = 0.05), dpi = 500) +
+    geom_vline(xintercept = 0, linetype = 2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in PlaB (Fig S6B)
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4
+ir_PlaB.100nM_STM.PlaB.100nM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.100nM$bin_dPSI_plab[match(ir_PlaB.100nM_STM.PlaB.100nM$Intron_ID,
+                                         ir_DMSO_PlaB.100nM$Intron_ID)]
+
+p1 <- ggplot(ir_PlaB.100nM_STM.PlaB.100nM[!is.na(ir_PlaB.100nM_STM.PlaB.100nM$bin_dPSI_plab),], 
+             aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma PlaB.100nM vs STM.PlaB.100nM") + 
+    geom_vline(xintercept = 0, linetype = 2) +
+    coord_cartesian(xlim = c(-0.5,0.5))
+
+p2 <- ggplot(ir_PlaB.100nM_STM.PlaB.100nM[!is.na(ir_PlaB.100nM_STM.PlaB.100nM$bin_dPSI_plab),], 
+             aes(x = bin_dPSI_plab, y = delta_IR_lm)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "Up-regulated in PlaB")
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## STM in DMSO (Fig S6D)
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4
+ir_DMSO_STM$bin_dPSI_plab <- 
+    ir_DMSO_PlaB.100nM$bin_dPSI_plab[match(ir_DMSO_STM$Intron_ID,
+                                         ir_DMSO_PlaB.100nM$Intron_ID)]
+
+p1 <- ggplot(ir_DMSO_STM, aes(x = delta_IR_lm, color = bin_dPSI_plab)) + 
+    stat_ecdf() + 
+    labs(y = "Accumulated fraction", x = "Delta IR limma DMSO vs STM") + 
+    geom_vline(xintercept = 0, linetype = 2) 
+
+p2 <- ggplot(ir_DMSO_STM, aes(x = bin_dPSI_plab, y = delta_IR_lm)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    stat_compare_means(comparisons = list(c("Not", "Sig")), label = "p.signif") + 
+    labs(x = "Significantly up-regulated in PlaB")
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+:::
+
+:::
+
+# Comparison between mRNA and dFORCE result
+
+## IRratio in mature and nascent RNA for express genes
+To identify the intron in expressed gene, here I filter for SS ratio and the coverage at the 
+adjacent exons.
+
+## Fig S5A
+
+```{r}
+## read and process dFORCE IRratio
+IRratio_dFORCE <- readRDS("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/06 dFORCE/rds/IRratio_all_introns_dFORCE.rds")
+
+IRratio_dFORCE$Sample <- sub("dForce_", "", IRratio_dFORCE$Sample)
+IRratio_dFORCE$Sample <- sub(".sorted.1nt.bw", "", IRratio_dFORCE$Sample)
+## prepare data
+IRratio_dFORCE <- IRratio_dFORCE %>%
+  mutate(
+    condition = case_when(
+      str_detect(Sample, "PlaB_STM|STM_PlaB") ~ "PlaB.STM",
+      str_detect(Sample, "DMSO")              ~ "DMSO",
+      str_detect(Sample, "PlaB")              ~ "PlaB",
+      str_detect(Sample, "STM")               ~ "STM",
+      TRUE ~ NA_character_
+    ),
+    rep = sub(".*_", "", Sample),
+    replicate = case_when(rep %in% c("2h", "1") ~ "rep1",
+                          T ~ rep)
+    )
+IRratio_dFORCE$rep <- NULL
+
+IRratio_dFORCE_sum <- IRratio_dFORCE %>%
+    group_by(Intron_ID, condition) %>% 
+    summarise(mean_IRratio = mean(IRratio, na.rm = T),
+              mean_IntronDepth = mean(IntronDepth, na.rm = T),
+              mean_maxExon_expression = mean(maxExon_expression, na.rm = T),
+              mean_SSratio_L = mean(SSratio_L, na.rm = T),
+              mean_SSratio_R = mean(SSratio_R, na.rm = T), .groups = "drop")
+
+SSratio <- 1.2
+maxExon_expression <- 10
+
+IRratio_dFORCE_sum_f <- IRratio_dFORCE_sum %>%
+    filter(mean_IRratio <= 1, 
+           mean_SSratio_L > SSratio | mean_SSratio_R > SSratio,
+           mean_maxExon_expression >= maxExon_expression)  %>%
+    mutate(experiment = "dFORCE")
+
+## mRNA data
+IRratio_mRNA_sum <- IRratio_mRNA %>%
+    group_by(Intron_ID, condition) %>% 
+    summarise(mean_IRratio = mean(IRratio, na.rm = T),
+              mean_IntronDepth = mean(IntronDepth, na.rm = T),
+              mean_maxExon_expression = mean(maxExon_expression, na.rm = T),
+              mean_SSratio_L = mean(SSratio_L, na.rm = T),
+              mean_SSratio_R = mean(SSratio_R, na.rm = T), .groups = "drop")
+
+SSratio <- 1.2
+maxExon_expression <- 10
+
+IRratio_mRNA_sum_f <- IRratio_mRNA_sum %>%
+    filter(mean_IRratio <= 1, 
+           mean_SSratio_L > SSratio | mean_SSratio_R > SSratio,
+           mean_maxExon_expression >= maxExon_expression) %>%
+    mutate(experiment = "mRNA")
+
+tmp <- rbind(IRratio_dFORCE_sum_f, IRratio_mRNA_sum_f) 
+p <- ggplot(tmp[tmp$experiment=="dFORCE",], 
+            aes(x = condition, y = mean_IRratio)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 0.9, vjust = 0.9)) + 
+    labs(x = NULL, title = "dFORCE") 
+gt <- fix_panel_size(p, panel_width = 3, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Fig S5B
+
+```{r}
+p <- ggplot(tmp[tmp$experiment=="mRNA",], 
+            aes(x = condition, y = mean_IRratio)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 0.9, vjust = 0.9)) + 
+    labs(x = NULL, title = "mRNA") +
+    coord_cartesian(ylim = c(0,0.15))
+gt <- fix_panel_size(p, panel_width = 3, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## m6A stoichiometry
+
+```{r}
+## dFORCE
+m6A_all_dFORCE <- readRDS("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/06 dFORCE/rds/m6A_all_dFORCE.rds")
+m6A_all_dFORCE$condition_RNA <- paste0(m6A_all_dFORCE$condition, "_dFORCE")
+## mRNA
+m6A_all_mRNA <- readRDS("~/Desktop/Project/Julian_lab/m6A_splicing_deposition_code/07 Nanopore mRNA/rds/m6A_mRNA_nanopore.rds")
+
+
+DMSO_m6A_dFORCE <- m6A_all_dFORCE[m6A_all_dFORCE$condition == "DMSO"]
+DMSO_m6A_mRNA <- m6A_all_mRNA[m6A_all_mRNA$condition == "DMSO"]
+
+p <- ggplot(rbind(mcols(DMSO_m6A_mRNA)[,c("Stoichiometry", "condition_RNA")],
+             mcols(DMSO_m6A_dFORCE[,c("Stoichiometry", "condition_RNA")])),
+       aes(x = condition_RNA, y = Stoichiometry)) +
+    geom_boxplot(outlier.shape = NA) + 
+    labs(title = paste0("mRNA median: ", round(median(DMSO_m6A_mRNA$Stoichiometry),2), 
+                        " | dFORCE median: ", round(median(DMSO_m6A_dFORCE$Stoichiometry), 2)),
+         x = NULL)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Fig S5D
+
+```{r}
+p <- ggplot(as.data.frame(m6A_all_dFORCE),
+       aes(x = condition, y = Stoichiometry)) +
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = NULL) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Fig S5E
+
+```{r}
+p <- ggplot(as.data.frame(m6A_all_mRNA),
+       aes(x = condition, y = Stoichiometry)) +
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = NULL) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+```{r}
+#| eval: false
+DMSO_m6A_both <- data.frame(ID = unique(c(DMSO_m6A_dFORCE$ID,
+                                          DMSO_m6A_mRNA$ID)))
+
+DMSO_m6A_both$m6A_group <- case_when(
+    DMSO_m6A_both$ID %in% intersect(DMSO_m6A_dFORCE$ID, DMSO_m6A_mRNA$ID) ~ "Both",
+    DMSO_m6A_both$ID %in% DMSO_m6A_dFORCE$ID ~ "Only dFORCE",
+    DMSO_m6A_both$ID %in% DMSO_m6A_mRNA$ID ~ "Only mRNA"
+)
+
+DMSO_m6A_both_mRNA <- DMSO_m6A_both %>% mutate(group = "mRNA")
+DMSO_m6A_both_dFORCE <- DMSO_m6A_both %>% mutate(group = "dFORCE")
+
+## load and assign mRNA stoi data
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/filtered_m6A_cov_5/"
+all_f <- list.files(path_f)
+
+for (i in 1:length(all_f)) {
+    if (i == 1) {
+        all_sites <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        all_sites$sample <- sub("HEK293T_mRNA_", "", all_f[[i]]) %>%
+            sub("_filtered_m6A.bed", "", .)
+    } else {
+        tmp <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        tmp$sample <- sub("HEK293T_mRNA_", "", all_f[[i]]) %>%
+            sub("_filtered_m6A.bed", "", .)
+        all_sites <- rbind(all_sites, tmp)
+    }
+}
+
+all_sites <- all_sites %>% mutate(
+    condition = case_when(
+      str_detect(sample, "STM_PlaB1_")        ~ "STM.PlaB.1nM",
+      str_detect(sample, "STM_PlaB10_")       ~ "STM.PlaB.10nM",
+      str_detect(sample, "STM_PlaB100_")      ~ "STM.PlaB.100nM",
+      str_detect(sample, "PlaB100_")          ~ "PlaB.100nM",
+      str_detect(sample, "PlaB10_")           ~ "PlaB.10nM",
+      str_detect(sample, "PlaB1_")            ~ "PlaB.1nM",
+      str_detect(sample, "STM")               ~ "STM",
+      str_detect(sample, "DMSO")              ~ "DMSO",
+      TRUE                                    ~ NA_character_
+    )
+)
+
+all_sites$rep <- sub(".*_", "", all_sites$sample)
+all_sites$ID <- 
+    paste0(all_sites$chr, ":", all_sites$start, " ", all_sites$strand)
+all_sites$sample <- paste0(all_sites$condition,"_",all_sites$rep)
+
+all_mRNA_sites <- data.frame(ID = unique(all_sites$ID)) 
+
+test <- unique(all_sites$sample)
+for (i in 1:length(test)) {
+    tmp <- all_sites[all_sites$sample == test[[i]],]
+    all_mRNA_sites[,paste0(test[[i]], "_stoi")] <- tmp$Stoichiometry[match(
+        all_mRNA_sites$ID, tmp$ID
+    )]
+    
+}
+
+
+all_mRNA_sites <- as.data.frame(all_mRNA_sites) %>%
+  mutate(
+    DMSO_mean_stoi = rowMeans(across(matches("^DMSO_Rep[0-9]+_stoi$")), na.rm = F)
+  ) 
+
+
+DMSO_m6A_both_mRNA$Stoichiomtry <- all_mRNA_sites$DMSO_mean_stoi[
+    match(DMSO_m6A_both_mRNA$ID, all_mRNA_sites$ID)
+]
+
+## load and assign dFORCE stoi data
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_dFORCE/m6A/"
+all_f <- list.files(path_f)
+
+for (i in 1:length(all_f)) {
+    if (i == 1) {
+        all_sites <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        all_sites$sample <- sub("_filtered.*", "", all_f[[i]]) %>%
+            sub("HEK293T_dFirce_", "", .) %>%
+            sub("HEK293T_dForce_", "", .) %>%
+            sub("dForce_", "", .)
+    } else {
+        tmp <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        tmp$sample <- sub("_filtered.*", "", all_f[[i]]) %>%
+            sub("HEK293T_dFirce_", "", .) %>%
+            sub("HEK293T_dForce_", "", .) %>%
+            sub("dForce_", "", .)
+        all_sites <- rbind(all_sites, tmp)
+    }
+}
+
+all_sites <- all_sites %>% mutate(
+    condition = case_when(
+      str_detect(sample, "PlaB_STM|STM_PlaB") ~ "PlaB.STM",
+      str_detect(sample, "DMSO")              ~ "DMSO",
+      str_detect(sample, "PlaB")              ~ "PlaB",
+      str_detect(sample, "STM")               ~ "STM",
+      TRUE                                    ~ NA_character_
+    )
+)
+
+all_sites$rep <- sub(".*_", "", all_sites$sample) 
+all_sites$rep <- case_when(all_sites$rep %in% c("2h", "1") ~ "rep1",
+                      T ~ all_sites$rep)
+
+all_sites$ID <- 
+    paste0(all_sites$chr, ":", all_sites$start, " ", all_sites$strand)
+all_sites$sample <- paste0(all_sites$condition,"_",all_sites$rep)
+
+all_dFORCE_sites <- data.frame(ID = unique(all_sites$ID)) 
+
+test <- unique(all_sites$sample)
+for (i in 1:length(test)) {
+    tmp <- all_sites[all_sites$sample == test[[i]],]
+    all_dFORCE_sites[,paste0(test[[i]], "_stoi")] <- tmp$Stoichiometry[match(
+        all_dFORCE_sites$ID, tmp$ID
+    )]
+    
+}
+
+
+all_dFORCE_sites <- as.data.frame(all_dFORCE_sites) %>%
+  mutate(
+    DMSO_mean_stoi = if_else(
+      rowSums(!is.na(pick(matches("^DMSO_rep[0-9]+_stoi$")))) >= 2,
+      rowMeans(pick(matches("^DMSO_rep[0-9]+_stoi$")), na.rm = TRUE),
+      NA_real_
+    )
+  )
+
+
+DMSO_m6A_both_dFORCE$Stoichiomtry <- all_dFORCE_sites$DMSO_mean_stoi[
+    match(DMSO_m6A_both_mRNA$ID, all_dFORCE_sites$ID)
+]
+DMSO_m6A_both <- rbind(DMSO_m6A_both_dFORCE, DMSO_m6A_both_mRNA)
+
+saveRDS(DMSO_m6A_both, "rds/DMSO_m6A_both.rds")
+```
+
+```{r}
+DMSO_m6A_both <- readRDS("rds/DMSO_m6A_both.rds")
+DMSO_m6A_both$m6A_group <- factor(DMSO_m6A_both$m6A_group,
+                                  levels = c("Only dFORCE", "Both", "Only mRNA"))
+p <- ggplot(DMSO_m6A_both, aes(x = group, y = Stoichiomtry, fill = m6A_group)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    labs(x = "Stoichiometry value in", fill = "m6A detected in: ")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+DMSO_m6A_both_dFORCE <- DMSO_m6A_both[DMSO_m6A_both$group == "dFORCE",]
+DMSO_m6A_both_mRNA <- DMSO_m6A_both[DMSO_m6A_both$group == "mRNA",]
+
+DMSO_m6A_both_dFORCE$Stoichiometry_mRNA <- DMSO_m6A_both_mRNA$Stoichiomtry[match(
+    DMSO_m6A_both_dFORCE$ID, DMSO_m6A_both_mRNA$ID
+)]
+
+p <- ggplot(DMSO_m6A_both_dFORCE, aes(x = Stoichiomtry, y = Stoichiometry_mRNA)) +
+    ggrastr::rasterize(geom_pointdensity(size = 0.2), dpi = 500) + 
+    labs(y = "Stoichiometry in mRNA", x = "Stoichiometry in nascent RNA") + 
+    geom_abline(linetype = 2, size = 1.2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+```{r}
+p <- ggplot(DMSO_m6A_both_dFORCE, aes(x = Stoichiomtry, y = Stoichiometry_mRNA, color = m6A_group)) +
+    ggrastr::rasterize(geom_point(alpha = 0.6,size = 0.2), dpi = 500) + 
+    labs(y = "Stoichiometry in mRNA", x = "Stoichiometry in nascent RNA") + 
+    geom_abline(linetype = 2)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+## STM effect on m6A stoichiometry and detected m6A number
+
+### Stoichiometry
+
+:::panel-tabset
+
+## mRNA Fig S5E
+
+```{r}
+p <- ggplot(as.data.frame(DMSO_m6A_mRNA),
+       aes(x = DMSO_mean_stoi,y = STM_mean_stoi)) + 
+    ggrastr::rasterize(geom_point(size = 0.15, stroke = 0.05), dpi = 500) + 
+    geom_abline(linetype = 2) + 
+    labs(title = "mRNA")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## dFORCE Fig S5D
+
+```{r}
+p <- ggplot(as.data.frame(DMSO_m6A_dFORCE),
+       aes(x = DMSO_mean_stoi,y = STM_mean_stoi)) + 
+    ggrastr::rasterise(geom_point(size = 0.15, stroke = 0.05), dpi = 400) + 
+    geom_abline(linetype = 2) + 
+    labs(title = "dFORCE")
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+### Number
+
+```{r}
+tmp <- c("DMSO", "STM") 
+m6A_all_mRNA$RNA <- "mRNA"
+m6A_all_dFORCE$RNA <- "dFORCE"
+
+p <- rbind(mcols(m6A_all_mRNA[m6A_all_mRNA$condition %in% tmp, c("condition", "RNA")]),
+      mcols(m6A_all_dFORCE[m6A_all_dFORCE$condition %in% tmp, c("condition", "RNA")])) %>%
+    ggplot(., aes(x = RNA, fill = condition)) + 
+    geom_bar(position = "dodge") + 
+    geom_label(aes(label = ..count..), stat = "count", size = 2,
+               position = position_dodge(width = 0.9), show.legend = F)
+gt <- fix_panel_size(p, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## m6A location 
+
+:::panel-tabset
+
+## mRNA Figure S5C
+
+```{r}
+m6A_all_mRNA <- dis_to_SS_v2(m6A_all_mRNA, hg38, width_bs = 1) %>% suppressWarnings(.)
+# m6A_all_mRNA <- as.data.frame(m6A_all_mRNA) %>% 
+#     mutate(assigned_to = case_when(transcript_id == trans_id_intron ~ "Intron",
+#                                    transcript_id == trans_id_exon ~ "Exon",
+#                                    T ~ "Not assigned")) %>%
+#     makeGRangesFromDataFrame(., keep.extra.columns = T)
+m6A_all_mRNA <- m6A_assignment_intron_version(m6A_all_mRNA, hg38)
+m6A_all_mRNA$assigned_to <- case_when(!is.na(m6A_all_mRNA$type) ~ m6A_all_mRNA$type,
+                                      T ~ "not assigned")
+
+p1 <- ggplot(as.data.frame(m6A_all_mRNA[m6A_all_mRNA$assigned_to != "not assigned"]),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar()  +
+    geom_label(aes(label = ..count..), stat = "count", show.legend = F, size = 2) + 
+    labs(x = NULL) + 
+    theme(axis.text.x = element_text(angle = 90))
+
+p2 <- ggplot(as.data.frame(m6A_all_mRNA[m6A_all_mRNA$assigned_to != "not assigned"]),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar(position = "fill") +
+    labs(x = NULL, y = "Fraction") + 
+    theme(axis.text.x = element_text(angle = 90)) +
+    geom_text(
+    stat = "count",
+    aes(
+      label = scales::percent(after_stat(count / ave(count, x, FUN = sum)),
+                              accuracy = 0.1)
+    ),
+    position = position_fill(vjust = 0.5),
+    size = 2
+  )
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Fig 5C
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+## dFORCE Fig S5C
+
+```{r}
+m6A_all_dFORCE <- m6A_assignment_intron_version(m6A_all_dFORCE, hg38)
+m6A_all_dFORCE$assigned_to <- case_when(!is.na(m6A_all_dFORCE$type) ~ m6A_all_dFORCE$type,
+                                      T ~ "not assigned")
+
+p1 <- ggplot(as.data.frame(m6A_all_dFORCE[m6A_all_dFORCE$assigned_to != "not assigned"]),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar()  +
+    geom_label(aes(label = ..count..), stat = "count", show.legend = F,size = 1.5) + 
+    labs(x = NULL) + 
+    theme(axis.text.x = element_text(angle = 90))
+p2 <- ggplot(as.data.frame(m6A_all_dFORCE[m6A_all_dFORCE$assigned_to != "not assigned"]),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar(position = "fill") +
+    labs(x = NULL, y = "Fraction") + 
+    theme(axis.text.x = element_text(angle = 90)) + 
+    geom_text(
+    stat = "count",
+    aes(
+      label = scales::percent(after_stat(count / ave(count, x, FUN = sum)),
+                              accuracy = 0.1)
+    ),
+    position = position_fill(vjust = 0.5),
+    size = 2
+  )
+gt <- fix_panel_size(p1, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+## Fig 5B
+
+```{r}
+gt <- fix_panel_size(p2, panel_width = panel_width, panel_height = panel_height)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+
+:::
+
+### Numbers
+
+```{r}
+mRNA_m6A_dmso <- m6A_all_mRNA[m6A_all_mRNA$condition == "DMSO"]
+dFORCE_m6A_dmso <- m6A_all_dFORCE[m6A_all_dFORCE$condition == "DMSO"]
+
+paste0("We detect ", length(mRNA_m6A_dmso[mRNA_m6A_dmso$assigned_to == "exon"]), 
+                            " exonic m6A in mRNA")
+paste0("We detect ", length(dFORCE_m6A_dmso[dFORCE_m6A_dmso$assigned_to == "exon"]), 
+                            " exonic m6A in dFROCE")
+
+paste0("Median stoichiometry of exonic m6A in mRNA: ", 
+       round(median(mRNA_m6A_dmso$Stoichiometry[mRNA_m6A_dmso$assigned_to == "exon"]),1))
+paste0("Median stoichiometry of exonic m6A in dFORCE: ", 
+       round(median(dFORCE_m6A_dmso$Stoichiometry[dFORCE_m6A_dmso$assigned_to == "exon"]),1))
+
+paste0("Median stoichiometry of intronic m6A in dFORCE: ", 
+       round(median(dFORCE_m6A_dmso$Stoichiometry[dFORCE_m6A_dmso$assigned_to == "intron"]),1))
+```
+
+
+## Intronic m6A which only detected in dFORCE Pie chart
+
+```{r}
+intron_m6A_dFORCE <- dFORCE_m6A_dmso[which(dFORCE_m6A_dmso$assigned_to == "intron")]
+
+intron_m6A_dFORCE$present_in_mature <- 
+    intron_m6A_dFORCE %over% mRNA_m6A_dmso
+
+plot_df <- as.data.frame(intron_m6A_dFORCE) %>%
+  dplyr::count(present_in_mature) %>%
+  mutate(
+    percentage = n / sum(n) * 100,
+    label = sprintf("n = %d\n(%.1f%%)", n, percentage)
+  )
+
+ggplot(plot_df, aes(x = factor(1), y = n, fill = present_in_mature)) +
+  geom_col(width = 1, color = "white") +
+  geom_text(
+    aes(label = label),
+    position = position_stack(vjust = 0.5),
+    size = 5,
+    fontface = "bold",
+    color = "white"
+  ) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(fill = "Present in mature RNA")
+```
+
+## m6A stoichiometry different upon PlaB treatment in mRNA
+
+```{r}
+m6A_all_mRNA$bin_dis_SS <- cut(m6A_all_mRNA$dis_SS, breaks = c(0,50,100,200,Inf))
+## make IR result into GR object
+make_ir_gr <- function(ir){
+    ir$chr <- sub(":.*", "",ir$Intron_ID) %>% as.factor(.)
+    ir$start <- getstr(ir$Intron_ID, ":", 1, "-", 1) %>% as.numeric(.)
+    ir$end <- getstr(ir$Intron_ID, "-", 1, "_", 1) %>% as.numeric(.)
+    ir$strand <- sub(".*_", "", ir$Intron_ID)
+    
+    ir <- makeGRangesFromDataFrame(ir, keep.extra.columns = T)
+    return(ir)
+}
+
+gr_DMSO_PlaB.1nM <- make_ir_gr(ir_DMSO_PlaB.1nM)
+gr_DMSO_PlaB.10nM <- make_ir_gr(ir_DMSO_PlaB.10nM)
+gr_DMSO_PlaB.100nM <- make_ir_gr(ir_DMSO_PlaB.100nM)
+
+## assign m6A to the dPSI of IR ratio PlaB KO - DMSO
+m6A_all_mRNA$test_start <- case_when(!is.na(m6A_all_mRNA$exon_start) ~ m6A_all_mRNA$exon_start,
+                                     !is.na(m6A_all_mRNA$intron_start) ~ m6A_all_mRNA$intron_start,
+                                     T ~ NA)
+
+m6A_all_mRNA$test_end <- case_when(!is.na(m6A_all_mRNA$exon_end) ~ m6A_all_mRNA$exon_end,
+                                     !is.na(m6A_all_mRNA$intron_end) ~ m6A_all_mRNA$intron_end,
+                                     T ~ NA)
+
+## start
+test_start <- data.frame(ID = m6A_all_mRNA$ID,
+                         chr = seqnames(m6A_all_mRNA),
+                         start = m6A_all_mRNA$test_start,
+                         end = m6A_all_mRNA$test_start,
+                         strand = strand(m6A_all_mRNA)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+## end
+test_end <- data.frame(ID = m6A_all_mRNA$ID,
+                         chr = seqnames(m6A_all_mRNA),
+                         start = m6A_all_mRNA$test_end,
+                         end = m6A_all_mRNA$test_end,
+                         strand = strand(m6A_all_mRNA)) %>%
+    filter(!is.na(start)) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+## assign splicing speed data
+## end
+test_end$delta_IR_lm.1nM <- gr_DMSO_PlaB.1nM$delta_IR_lm[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.1nM, select = "first")]
+test_end$adj.P.Val.1nM <- gr_DMSO_PlaB.1nM$adj.P.Val[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.1nM, select = "first")]
+
+test_end$delta_IR_lm.10nM <- gr_DMSO_PlaB.10nM$delta_IR_lm[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.10nM, select = "first")]
+test_end$adj.P.Val.10nM <- gr_DMSO_PlaB.10nM$adj.P.Val[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.10nM, select = "first")]
+
+test_end$delta_IR_lm.100nM <- gr_DMSO_PlaB.100nM$delta_IR_lm[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.100nM, select = "first")]
+test_end$adj.P.Val.100nM <- gr_DMSO_PlaB.100nM$adj.P.Val[
+    findOverlaps((test_end+10), gr_DMSO_PlaB.100nM, select = "first")]
+
+## start
+test_start$delta_IR_lm.1nM <- gr_DMSO_PlaB.1nM$delta_IR_lm[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.1nM, select = "first")]
+test_start$adj.P.Val.1nM <- gr_DMSO_PlaB.1nM$adj.P.Val[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.1nM, select = "first")]
+
+test_start$delta_IR_lm.10nM <- gr_DMSO_PlaB.10nM$delta_IR_lm[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.10nM, select = "first")]
+test_start$adj.P.Val.10nM <- gr_DMSO_PlaB.10nM$adj.P.Val[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.10nM, select = "first")]
+
+test_start$delta_IR_lm.100nM <- gr_DMSO_PlaB.100nM$delta_IR_lm[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.100nM, select = "first")]
+test_start$adj.P.Val.100nM <- gr_DMSO_PlaB.100nM$adj.P.Val[
+    findOverlaps((test_start+10), gr_DMSO_PlaB.100nM, select = "first")]
+
+## end
+m6A_all_mRNA$end_delta_IR_lm.1nM <- test_end$delta_IR_lm.1nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+m6A_all_mRNA$end_adj.P.Val.1nM <- test_end$adj.P.Val.1nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+
+m6A_all_mRNA$end_delta_IR_lm.10nM <- test_end$delta_IR_lm.10nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+m6A_all_mRNA$end_adj.P.Val.10nM <- test_end$adj.P.Val.10nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+
+m6A_all_mRNA$end_delta_IR_lm.100nM <- test_end$delta_IR_lm.100nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+m6A_all_mRNA$end_adj.P.Val.100nM <- test_end$adj.P.Val.100nM[
+    match(m6A_all_mRNA$ID, test_end$ID)
+]
+
+## start
+m6A_all_mRNA$start_delta_IR_lm.1nM <- test_start$delta_IR_lm.1nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+m6A_all_mRNA$start_adj.P.Val.1nM <- test_start$adj.P.Val.1nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+
+m6A_all_mRNA$start_delta_IR_lm.10nM <- test_start$delta_IR_lm.10nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+m6A_all_mRNA$start_adj.P.Val.10nM <- test_start$adj.P.Val.10nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+
+m6A_all_mRNA$start_delta_IR_lm.100nM <- test_start$delta_IR_lm.100nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+m6A_all_mRNA$start_adj.P.Val.100nM <- test_start$adj.P.Val.100nM[
+    match(m6A_all_mRNA$ID, test_start$ID)
+]
+
+
+m6A_all_mRNA$delta_IR_lm_mean.1nM <- 
+    rowMeans(mcols(m6A_all_mRNA)[, c("start_delta_IR_lm.1nM", "end_delta_IR_lm.1nM")] %>%
+        as.data.frame(.), na.rm = T)
+m6A_all_mRNA$delta_IR_lm_mean.10nM <- 
+    rowMeans(mcols(m6A_all_mRNA)[, c("start_delta_IR_lm.10nM", "end_delta_IR_lm.10nM")] %>%
+        as.data.frame(.), na.rm = T)
+m6A_all_mRNA$delta_IR_lm_mean.100nM <- 
+    rowMeans(mcols(m6A_all_mRNA)[, c("start_delta_IR_lm.100nM", "end_delta_IR_lm.100nM")] %>%
+        as.data.frame(.), na.rm = T)
+
+m6A_all_mRNA$bin_delta_IR_lm_mean.1nM <- cut(m6A_all_mRNA$delta_IR_lm_mean.1nM,
+                                            breaks = c(-Inf,0,0.1,0.2,0.4,Inf))
+m6A_all_mRNA$bin_delta_IR_lm_mean.10nM <- cut(m6A_all_mRNA$delta_IR_lm_mean.10nM,
+                                            breaks = c(-Inf,0,0.1,0.2,0.4,Inf))
+m6A_all_mRNA$bin_delta_IR_lm_mean.100nM <- cut(m6A_all_mRNA$delta_IR_lm_mean.100nM,
+                                            breaks = c(-Inf,0,0.1,0.2,0.4,Inf))
+```
+
+
+:::panel-tabset
+
+## PlaB 3 concentration boxplot Fig 6C
+
+
+```{r}
+## identify intronless gene
+intronless <- hg38[hg38$type == "exon"] %>% as.data.frame(.) %>%
+    group_by(gene_id) %>%
+    mutate(exon_number == as.numeric(exon_number)) %>%
+    filter(max(exon_number) == 1)
+intronless <- hg38[hg38$type == "exon" & hg38$gene_id %in% intronless$gene_id]
+```
+
+
+```{r}
+m6A_all_mRNA$bin_dis_SS <- case_when(
+    substr(m6A_all_mRNA$transcript_id,1,15) %in% substr(intronless$transcript_id,1,15) ~ 
+        "Intronless",
+    m6A_all_mRNA$assigned_to == "exon" ~ as.character(m6A_all_mRNA$bin_dis_SS),
+    m6A_all_mRNA$assigned_to == "intron" ~ "Intron",
+    T ~ NA)
+m6A_all_mRNA$bin_dis_SS <- factor(m6A_all_mRNA$bin_dis_SS,
+                                  levels = c("(0,50]", "(50,100]", "(100,200]",
+                                             "(200,Inf]", "Intronless", "Intron"))
+
+m6A_PlaB_mRNA <- m6A_all_mRNA[which(grepl("PlaB", m6A_all_mRNA$condition) &
+                                    !grepl("STM", m6A_all_mRNA$condition))] 
+
+m6A_PlaB_mRNA <- as.data.frame(m6A_PlaB_mRNA) %>% 
+    mutate(dif_stoi_PlaB_DMSO = case_when(
+        condition == "PlaB.1nM" ~ PlaB.1nM_mean_stoi - DMSO_mean_stoi,
+        condition == "PlaB.10nM" ~ PlaB.10nM_mean_stoi - DMSO_mean_stoi,
+        condition == "PlaB.100nM" ~ PlaB.100nM_mean_stoi - DMSO_mean_stoi,
+        T ~ NA
+    ))
+
+m6A_PlaB_mRNA$condition <- factor(m6A_PlaB_mRNA$condition,
+                                  levels = c("PlaB.1nM", "PlaB.10nM", "PlaB.100nM"))
+m6A_PlaB_mRNA$bin_dis_SS <- factor(m6A_PlaB_mRNA$bin_dis_SS,
+                                  levels = c("(0,50]", "(50,100]", "(100,200]",
+                                             "(200,Inf]", "Intronless", "Intron"))
+ggplot(as.data.frame(m6A_PlaB_mRNA[!is.na(m6A_PlaB_mRNA$assigned_to) &
+                                      !is.na(m6A_PlaB_mRNA$bin_dis_SS),]), 
+       aes(x = bin_dis_SS, y = dif_stoi_PlaB_DMSO, fill = condition)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-40,100)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+```{r}
+ggplot(as.data.frame(m6A_PlaB_mRNA[!is.na(m6A_PlaB_mRNA$assigned_to) &
+                                      !is.na(m6A_PlaB_mRNA$bin_dis_SS),]), 
+       aes(fill = bin_dis_SS, y = dif_stoi_PlaB_DMSO, x = condition)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    coord_cartesian(ylim = c(-40,100)) + 
+    geom_hline(yintercept = 0, linetype = 2)
+```
+
+## PlaB 100nM exonic m6A stoi dif dPSI Fig 5D
+
+
+```{r}
+PlaB.100nM_m6A_mRNA <- m6A_all_mRNA[m6A_all_mRNA$condition == "PlaB.100nM",]
+PlaB.100nM_m6A_mRNA$dif_stoi_dmso_plab <- 
+    PlaB.100nM_m6A_mRNA$PlaB.100nM_mean_stoi - PlaB.100nM_m6A_mRNA$DMSO_mean_stoi
+
+PlaB.100nM_m6A_mRNA$bin_delta_IR_lm_mean.100nM <- cut(PlaB.100nM_m6A_mRNA$delta_IR_lm_mean.100nM,
+                                            breaks = c(-Inf,0,0.1,0.2,Inf))
+
+p <- ggplot(as.data.frame(PlaB.100nM_m6A_mRNA[which(PlaB.100nM_m6A_mRNA$assigned_to == "exon" &
+                                      !is.na(PlaB.100nM_m6A_mRNA$bin_dis_SS) &
+                                      !is.na(PlaB.100nM_m6A_mRNA$bin_delta_IR_lm_mean.100nM) &
+                                          PlaB.100nM_m6A_mRNA$bin_dis_SS != "Intronless")]), 
+       aes(fill = bin_dis_SS, y = dif_stoi_dmso_plab, x = bin_delta_IR_lm_mean.100nM)) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    coord_cartesian(ylim = c(-30,100))
+gt <- fix_panel_size(p, panel_width = 4, panel_height = 4)
+grid::grid.newpage()
+grid::grid.draw(gt)
+```
+
+:::
+
+
+# Annotation for bam subset
+
+```{r}
+#| eval: false
+gene_list <- c( "METTL2A", "METTL2B", "RCCD1", "TMEM147-AS1", "FAAP100", "TM2D2")
+gene <- hg38[hg38$gene_name %in% gene_list &
+                 hg38$type == "gene"]
+gene$score <- 1
+export.bed(gene, "interested_gene.bed")
+```
+
+# Spliced and unspliced reads
+
+```{r}
+#| eval: false
+## generate intron bed file
+exon <- hg38[hg38$type == "exon"]
+trans <- hg38[hg38$type == "transcript"]
+exon$exonID <- paste0(exon$transcript_id, ",", exon$exon_number)
+exonsByTranscript <- split(hg38[hg38$type=="exon"],
+                           hg38[hg38$type=="exon"]$transcript_id)
+trans <- trans[match(names(exonsByTranscript),
+                     trans$transcript_id)]
+
+introns <- psetdiff(trans, exonsByTranscript)
+introns <- as(introns, "GRangesList") %>% unlist
+introns$score <- 1
+
+export.bed(introns, "~/Desktop/Data/Annotation/Human/hg38_v45_intron.bed")
+```
+
+Code for splitting reads based on spliced status:
+
+```ruby
+## code for split unspliced and spliced reads
+source ~/.bashrc
+
+set -euo pipefail
+shopt -s nullglob
+
+threads=16
+outdir="split_splicing"
+
+mkdir -p "$outdir"
+
+# Exclude:
+# 0x4   = unmapped
+flag_filter=4
+
+summary="$outdir/read_splicing_summary.tsv"
+
+echo -e "sample\tprimary_mapped\tspliced\tunspliced" > "$summary"
+
+for bam in *.bam; do
+
+    sample=$(basename "$bam" .bam)
+
+    echo "Processing $sample"
+
+    # Total number of primary mapped reads
+    total=$(samtools view \
+        -@ "$threads" \
+        -c \
+        -F "$flag_filter" \
+        "$bam")
+
+    # -----------------------
+    # Spliced reads
+    # CIGAR contains N
+    # -----------------------
+    samtools view \
+        -@ "$threads" \
+        -h \
+        -F "$flag_filter" \
+        "$bam" \
+    | awk 'BEGIN{OFS="\t"} /^@/ || $6 ~ /N/' \
+    | samtools view \
+        -@ "$threads" \
+        -b \
+        -o "$outdir/${sample}.spliced.bam" \
+        -
+
+    # -----------------------
+    # Unspliced reads
+    # CIGAR does not contain N
+    # -----------------------
+    samtools view \
+        -@ "$threads" \
+        -h \
+        -F "$flag_filter" \
+        "$bam" \
+    | awk 'BEGIN{OFS="\t"} /^@/ || $6 !~ /N/' \
+    | samtools view \
+        -@ "$threads" \
+        -b \
+        -o "$outdir/${sample}.unspliced.bam" \
+        -
+
+    # Index
+    samtools index \
+        -@ "$threads" \
+        "$outdir/${sample}.spliced.bam"
+
+    samtools index \
+        -@ "$threads" \
+        "$outdir/${sample}.unspliced.bam"
+
+    # Count
+    spliced=$(samtools view \
+        -@ "$threads" \
+        -c \
+        "$outdir/${sample}.spliced.bam")
+
+    unspliced=$(samtools view \
+        -@ "$threads" \
+        -c \
+        "$outdir/${sample}.unspliced.bam")
+
+    echo -e "${sample}\t${total}\t${spliced}\t${unspliced}" \
+        >> "$summary"
+
+    # Sanity check
+    if (( spliced + unspliced != total )); then
+        echo "WARNING: counts do not add up for $sample" >&2
+    fi
+
+    echo "$sample:"
+    echo "  primary mapped = $total"
+    echo "  spliced        = $spliced"
+    echo "  unspliced      = $unspliced"
+
+done
+
+echo "Read splitting completed"
+```
+
+Code for extract unspliced reads which overlap to intron boundary.
+
+```ruby
+## extract unspliced raeds which overlap to intron
+source ~/.bashrc    
+
+for bam in *.unspliced.bam; do
+    bedtools intersect \
+        -abam $bam \
+        -b ~/anno/hg38_v45/hg38_v45_intron.bed \
+        -u \
+        | samtools view -b -o ${bam%.unspliced.bam}_intron_overlapping.bam -
+
+    samtools index ${bam%.unspliced.bam}_intron_overlapping.bam
+done
+```
+
+The code above retains reads containing an 'N' in their CIGAR strings, as well as reads without an 
+'N' that overlap intronic regions, for downstream analysis.
+
+## Basic status 
+
+```{r}
+## read data mRNA
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_mRNA_all/read_split/"
+files_bed <- list.files(
+    path_f,
+    pattern = "\\.bed$",
+    full.names = TRUE
+)
+
+# Exclude STM samples
+files_bed <- files_bed[!grepl("STM", basename(files_bed))]
+
+# Extract sample type
+get_sample_type <- function(filename) {
+    filename <- basename(filename)
+
+    case_when(
+        str_detect(filename, "DMSO") ~ "DMSO",
+        str_detect(filename, "PlaB_?100") ~ "PlaB_100nM",
+        str_detect(filename, "PlaB_?10") ~ "PlaB_10nM",
+        str_detect(filename, "PlaB_?1") ~ "PlaB_1nM",
+        TRUE ~ NA_character_
+    )
+}
+
+# Extract replicate information
+get_replicate <- function(filename) {
+    filename <- basename(filename)
+
+    case_when(
+        str_detect(filename, regex("repeat_vol2", ignore_case = TRUE)) ~ "rep1",
+        str_detect(filename, regex("rep2", ignore_case = TRUE)) ~ "rep2",
+        str_detect(filename, regex("rep1", ignore_case = TRUE)) ~ "rep1",
+        TRUE ~ NA_character_
+    )
+}
+
+# Read BED files and add metadata
+bed_data_mRNA <- map_dfr(files_bed, function(file) {
+
+    tmp <- read_nanopore_bed(file)
+    
+    as.data.frame(tmp) %>%
+        mutate(
+            sample_type = get_sample_type(file),
+            replicate = get_replicate(file),
+
+            splice_type = if_else(
+                str_detect(basename(file), "\\.spliced_"),
+                "spliced",
+                "unspliced"
+            ),
+
+            sample_id = str_remove(
+                basename(file),
+                "\\.sorted\\..*$"
+            )
+        )
+})
+
+## uniuqe id
+bed_data_mRNA$unique_id <- paste0(bed_data_mRNA$ID, "_", bed_data_mRNA$sample_type, "_", bed_data_mRNA$splice_type)
+keep <- table(bed_data_mRNA$unique_id[bed_data_mRNA$Stoichiometry > 20])
+keep <- names(keep)[keep == 2]
+
+## keep only 
+bed_data_mRNA_f <- bed_data_mRNA[bed_data_mRNA$unique_id %in% keep,]
+
+mRNA_m6A <- bed_data_mRNA_f %>%
+    group_by(chr, start, end, strand, ID, sample_type, splice_type) %>%
+    summarise(Stoi_mean = mean(Stoichiometry),
+              cov_mean = mean(N_valid_cov), .groups = "drop")
+## kep main chr sites
+mRNA_m6A <- mRNA_m6A[grep("chr", mRNA_m6A$chr),]
+```
+
+```{r}
+## read data dFORCE
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_dFORCE/intron_over/"
+files_bed <- list.files(
+    path_f,
+    pattern = "\\.bed$",
+    full.names = TRUE
+)
+
+# Exclude STM samples
+# files_bed <- files_bed[!grepl("STM", basename(files_bed))]
+
+# Extract sample type
+get_sample_type <- function(filename) {
+    filename <- basename(filename)
+
+    case_when(
+        str_detect(filename, "DMSO") ~ "DMSO",
+        str_detect(filename, "PlaB_STM|STM_PlaB") ~ "STM_PlaB",
+        str_detect(filename, "STM") ~ "STM",
+        str_detect(filename, "PlaB") ~ "PlaB",
+        TRUE ~ NA_character_
+    )
+}
+
+# Extract replicate information
+get_replicate <- function(filename) {
+    filename <- basename(filename)
+
+    case_when(
+        str_detect(filename, regex("rep4", ignore_case = TRUE)) ~ "rep4",
+        str_detect(filename, regex("rep2", ignore_case = TRUE)) ~ "rep2",
+        str_detect(filename, regex("rep1", ignore_case = TRUE)) ~ "rep1",
+        TRUE ~ NA_character_
+    )
+}
+
+# Read BED files and add metadata
+bed_data_dFORCE <- map_dfr(files_bed, function(file) {
+
+    tmp <- read_nanopore_bed(file)
+    
+    as.data.frame(tmp) %>%
+        mutate(
+            sample_type = get_sample_type(file),
+            replicate = get_replicate(file),
+
+            splice_type = if_else(
+                str_detect(basename(file), "\\.spliced_"),
+                "spliced",
+                "unspliced"
+            ),
+
+            sample_id = str_remove(
+                basename(file),
+                "\\.sorted\\..*$"
+            )
+        )
+})
+
+## uniuqe id
+bed_data_dFORCE$unique_id <- paste0(bed_data_dFORCE$ID, "_", bed_data_dFORCE$sample_type, 
+                                           "_", bed_data_dFORCE$splice_type)
+keep <- table(bed_data_dFORCE$unique_id[bed_data_dFORCE$Stoichiometry > 20])
+keep <- names(keep)[keep == 2]
+
+## keep only 
+bed_data_dFORCE_f <- bed_data_dFORCE[bed_data_dFORCE$unique_id %in% keep,]
+
+dFORCE_m6A <- bed_data_dFORCE_f %>%
+    group_by(chr, start, end, strand, ID, sample_type, splice_type) %>%
+    summarise(Stoi_mean = mean(Stoichiometry),
+              cov_mean = mean(N_valid_cov), .groups = "drop")
+## kep main chr sites
+dFORCE_m6A <- dFORCE_m6A[grep("chr", dFORCE_m6A$chr),]
+```
+
+:::panel-tabset
+
+## mRNA number
+
+```{r}
+ggplot(as.data.frame(mRNA_m6A), aes(x = sample_type, fill = splice_type)) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count", position = position_stack(vjust = 0.5),
+               show.legend = F)
+```
+
+## mRNA Stoi Fig S5G
+
+```{r}
+ggplot(mRNA_m6A, aes(x = sample_type, , y =  Stoi_mean, fill = splice_type)) + 
+    geom_boxplot(outlier.shape = NA)
+```
+
+## dFORCE number
+
+```{r}
+ggplot(dFORCE_m6A, aes(x = sample_type, fill = splice_type)) + 
+    geom_bar() + 
+    geom_label(aes(label = ..count..), stat = "count", position = position_stack(vjust = 0.5),
+               show.legend = F)
+```
+
+## dFORCE Stoi Fig S5F
+
+```{r}
+ggplot(dFORCE_m6A, aes(x = sample_type, , y =  Stoi_mean, fill = splice_type)) + 
+    geom_boxplot(outlier.shape = NA)
+```
+
+:::
+
+## Median stoichiometry
+
+```{r}
+paste0("Median stoichiometry with spliced reads in dFORCE DMSO: ",
+       round(median(dFORCE_m6A$Stoi_mean[dFORCE_m6A$sample_type == "DMSO" &
+                                             dFORCE_m6A$splice_type == "spliced"]), 3))
+
+paste0("Median stoichiometry with unspliced reads in dFORCE DMSO: ",
+       round(median(dFORCE_m6A$Stoi_mean[dFORCE_m6A$sample_type == "DMSO" &
+                                             dFORCE_m6A$splice_type == "unspliced"]), 3))
+
+paste0("Median stoichiometry with spliced reads in mRNA DMSO: ",
+       round(median(mRNA_m6A$Stoi_mean[mRNA_m6A$sample_type == "DMSO" &
+                                             mRNA_m6A$splice_type == "spliced"]), 3))
+```
+
+
+## Stoichiometry correlation spliced vs unspliced dFORCE
+
+```{r}
+DMSO_s <- dFORCE_m6A[dFORCE_m6A$sample_type == "DMSO" &
+                         dFORCE_m6A$splice_type == "spliced",]
+DMSO_uns_all <- bed_data_dFORCE[bed_data_dFORCE$sample_type == "DMSO" &
+                         bed_data_dFORCE$splice_type == "unspliced",]
+
+PlaB_s <- dFORCE_m6A[dFORCE_m6A$sample_type == "PlaB" &
+                         dFORCE_m6A$splice_type == "spliced",]
+PlaB_uns_all <- bed_data_dFORCE[bed_data_dFORCE$sample_type == "PlaB" &
+                         bed_data_dFORCE$splice_type == "unspliced",]
+
+## mean stoi
+DMSO_uns_all <- DMSO_uns_all %>%
+    group_by(ID) %>%
+    summarise(Stoi_mean = mean(Stoichiometry, na.rm = T))
+PlaB_uns_all <- PlaB_uns_all %>%
+    group_by(ID) %>%
+    summarise(Stoi_mean = mean(Stoichiometry, na.rm = T))
+
+DMSO_s$stoi_uns <- DMSO_uns_all$Stoi_mean[match(DMSO_s$ID,
+                                            DMSO_uns_all$ID)]
+PlaB_s$stoi_uns <- PlaB_uns_all$Stoi_mean[match(PlaB_s$ID,
+                                            PlaB_uns_all$ID)]
+```
+
+:::panel-tabset
+
+## DMSO
+
+```{r}
+ggplot(DMSO_s, aes(x = Stoi_mean, y = stoi_uns)) + 
+    geom_point() + 
+    geom_abline(linetype = 2) + 
+    labs(y = "Stoichiometry with unspliced reads",
+         x = "Stoichiometry with spliced reads")
+```
+
+## PlaB
+
+```{r}
+ggplot(PlaB_s, aes(x = Stoi_mean, y = stoi_uns)) + 
+    geom_point() + 
+    geom_abline(linetype = 2)  + 
+    labs(y = "Stoichiometry with unspliced reads",
+         x = "Stoichiometry with spliced reads")
+```
+
+:::
+
+## Stoichiometry comparison mRNA vs dFORCE
+
+```{r}
+DMSO_s_mRNA <- mRNA_m6A[mRNA_m6A$sample_type == "DMSO" &
+                            mRNA_m6A$splice_type == "spliced",]
+
+DMSO_s_mRNA$stoi_dFORCE <- DMSO_s$Stoi_mean[match(
+    DMSO_s_mRNA$ID, DMSO_s$ID
+)]
+
+ggplot(as.data.frame(DMSO_s_mRNA), aes(x = Stoi_mean, y = stoi_dFORCE)) + 
+    geom_point() + 
+    geom_abline(linetype = 2) +
+    labs(y = "Stoi in dFORCE spliced reads",
+         x = "Stoi in mRNA spliced reads") + 
+    stat_cor()
+```
+
+
+## EJC pattern for spliced and unspliced reads in dFORCE
+
+```{r}
+dFORCE_m6A <- makeGRangesFromDataFrame(dFORCE_m6A, keep.extra.columns = T)
+dFORCE_m6A <- dis_to_SS_v2(dFORCE_m6A, anno = hg38)
+
+dFORCE_m6A$bin_dis_SS <- cut(dFORCE_m6A$dis_SS,
+                             breaks = c(0,50,100,200,Inf))
+
+ggplot(as.data.frame(dFORCE_m6A[!is.na(dFORCE_m6A$bin_dis_SS)]),
+       aes(x = bin_dis_SS, y = Stoi_mean, fill = splice_type)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    facet_wrap(~sample_type)
+```
+
+# Supplementary table
+
+```{r}
+m6A_mRNA_df <- as.data.frame(m6A_all_mRNA)
+m6A_mRNA_df_f <- m6A_mRNA_df[,c(1:5,7,56)]
+write.xlsx(m6A_mRNA_df_f, "tables/Supplementary Table Sxx nanopore m6A polyA(+).xlsx")
+
+m6A_dFORCE_df <- as.data.frame(m6A_all_dFORCE)
+m6A_dFORCE_df_f <- m6A_dFORCE_df[,c(1:5,7,61,66,59)]
+write.xlsx(m6A_dFORCE_df_f, "tables/Supplementary Table Sxx nanopore m6A dFORCE.xlsx")
+```
+

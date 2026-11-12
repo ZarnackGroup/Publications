@@ -1,0 +1,383 @@
+---
+title: "04 dFORCE data process"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Julius-Maximilians-Universität Würzburg
+      affiliation-url: https://www.uni-wuerzburg.de/
+title-block-banner: true
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+execute:
+  echo: true
+  error: false
+  warning: false
+editor: 
+  markdown: 
+    wrap: 100
+---
+
+```{r}
+#| echo: false
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library(eulerr)
+library(ggsignif)
+library(tidyplots)
+library(gt)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/homemade_functions/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+## To make sure the number is in 150000000 format instead of 1.5e+08
+options(scipen = 999)
+
+## set theme skin
+font_szie <- 6
+linesize <- 0.5
+lw <- 0.5
+
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black",linewidth = lw, size = lw),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black", linewidth = lw, size = lw),
+      axis.ticks.y = element_line(color = "black",linewidth = lw, size = lw)))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+update_geom_defaults("abline",   list(color = "#993404", size = linesize))
+
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+grDevices::pdfFonts(Arial = grDevices::pdfFonts()[["Helvetica"]])
+basemean <- 10
+pvalue <- 0.05
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")
+DRACN <- "[GAT][GA]AC[ATCG]"
+
+fix_panel_size <- function(p, panel_width = 3, panel_height = 3, unit = "cm") {
+  gt <- ggplotGrob(p)
+  pp <- gt$layout[gt$layout$name == "panel", ]
+
+  gt$widths[pp$l]  <- grid::unit(panel_width, unit)
+  gt$heights[pp$t] <- grid::unit(panel_height, unit)
+
+  gt
+}
+
+panel_width <- 3
+panel_height <- 3
+```
+
+# Introduction
+This report collects code for analysing dFORCE data.
+
+---
+
+# m6A sites processing
+The raw pod5 files were basecalled with tool `dorado`. The modification basecalling model 
+`rna004_130bps_sup@v5.2.0 m6A DRACH` was used for m6A detection.
+
+The m6A sites which detected in at least two replicates in a certain condition are considered as 
+the high confident m6A sites and therefore used in the following analysis. The cutoff for m6A sites 
+are coverage > 5 & stoichiometry > 20.
+
+```{r}
+path_f <- "~/Desktop/Data/Julian_lab/Miona/Nanopore/PlaB_dFORCE/m6A/"
+all_f <- list.files(path_f)
+
+for (i in 1:length(all_f)) {
+    if (i == 1) {
+        all_sites <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        all_sites$sample <- sub("_filtered.*", "", all_f[[i]]) %>%
+            sub("HEK293T_dFirce_", "", .) %>%
+            sub("HEK293T_dForce_", "", .) %>%
+            sub("dForce_", "", .)
+    } else {
+        tmp <- read_nanopore_bed(paste0(path_f, all_f[[i]]))
+        tmp$sample <- sub("_filtered.*", "", all_f[[i]]) %>%
+            sub("HEK293T_dFirce_", "", .) %>%
+            sub("HEK293T_dForce_", "", .) %>%
+            sub("dForce_", "", .)
+        all_sites <- rbind(all_sites, tmp)
+    }
+}
+
+all_sites <- all_sites %>% mutate(
+    condition = case_when(
+      str_detect(sample, "PlaB_STM|STM_PlaB") ~ "PlaB.STM",
+      str_detect(sample, "DMSO")              ~ "DMSO",
+      str_detect(sample, "PlaB")              ~ "PlaB",
+      str_detect(sample, "STM")               ~ "STM",
+      TRUE                                    ~ NA_character_
+    )
+)
+
+all_sites$rep <- sub(".*_", "", all_sites$sample) 
+all_sites$rep <- case_when(all_sites$rep %in% c("2h", "1") ~ "rep1",
+                      T ~ all_sites$rep)
+all_sites$m6A <- all_sites$Stoichiometry > 20
+m6A_all <- all_sites[all_sites$m6A == T,] 
+
+## m6A presented in at least two reps as detected m6A sites
+m6A_all$ID_2 <- paste0(m6A_all$ID, "_", m6A_all$condition)
+
+n_id <- table(m6A_all$ID_2) %>% as.data.frame(.)
+n_id$condition <- sub(".*_", "", n_id$Var1)
+n_id$ID <- sub("_.*", "", n_id$Var1)
+## keep ID in more than two replicates
+n_id_f <- n_id[n_id$Freq >= 2,]
+```
+
+```{r}
+## function to make m6A GRange object from ID
+make_m6A_gr <- function(ID, info){
+    ## make coordinate df
+    df <- data.frame(seqnames = sub(":.*", "", ID$ID),
+                     start = getstr(ID$ID, ":", 1, " ", 1),
+                     end = getstr(ID$ID, ":", 1, " ", 1),
+                     strand = sub(".* ", "", ID$ID),
+                     ID = ID$ID,
+                     condition = ID$condition)
+    test_rep <- c("rep1", "rep2", "rep4")
+    unique_condition <- unique(ID$condition)
+    ## assign information
+    for (i in 1:length(unique_condition)) {
+    used_info <- info[info$condition == unique_condition[[i]],]
+    
+    ## loop through all reps
+
+    
+    for (i in seq_len(length(test_rep))) {
+        tmp_info <- used_info[used_info$rep == test_rep[[i]],]
+        ## new column names
+        name1 <- paste0(unique(tmp_info$condition), "_", unique(tmp_info$rep), "_", "N_cov")
+        name2 <- paste0(unique(tmp_info$condition), "_", unique(tmp_info$rep), "_", "stoi")
+        
+        ## assign value
+        df[[name1]] <- tmp_info$N_valid_cov[match(
+            df$ID, tmp_info$ID
+        )]
+        df[[name2]] <- tmp_info$Stoichiometry[match(
+            df$ID, tmp_info$ID
+        )]
+    }
+    }
+    out <- makeGRangesFromDataFrame(df, keep.extra.columns = T)
+    return(out)
+}
+
+```
+
+```{r}
+## make m6A
+m6A_all <- make_m6A_gr(n_id_f, all_sites)
+
+## calculate mean
+m6A_all <- as.data.frame(m6A_all) %>%
+  mutate(
+    DMSO_mean_cov = rowMeans(across(matches("^DMSO_rep[0-9]+_N_cov$")), na.rm = TRUE),
+    DMSO_mean_stoi = rowMeans(across(matches("^DMSO_rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    PlaB_mean_cov = rowMeans(across(matches("^PlaB_rep[0-9]+_N_cov$")), na.rm = TRUE),
+    PlaB_mean_stoi = rowMeans(across(matches("^PlaB_rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    PlaB.STM_mean_cov = rowMeans(across(matches("^PlaB\\.STM_rep[0-9]+_N_cov$")), na.rm = TRUE),
+    PlaB.STM_mean_stoi = rowMeans(across(matches("^PlaB\\.STM_rep[0-9]+_stoi$")), na.rm = TRUE),
+
+    STM_mean_cov = rowMeans(across(matches("^STM_rep[0-9]+_N_cov$")), na.rm = TRUE),
+    STM_mean_stoi = rowMeans(across(matches("^STM_rep[0-9]+_stoi$")), na.rm = TRUE)
+  ) %>%
+  mutate(
+    across(
+      ends_with(c("_mean_cov", "_mean_stoi")),
+      ~ replace(.x, is.nan(.x), NA_real_)
+    )
+  )
+
+m6A_all <- m6A_all[order(m6A_all$condition),]
+m6A_all <- makeGRangesFromDataFrame(m6A_all, keep.extra.columns = T)
+m6A_all <- m6A_all[seqnames(m6A_all) %in% standardChromosomes(m6A_all)]
+```
+
+# Basic status of detected m6A sites
+
+:::panel-tabset
+
+## Number
+
+```{r}
+ggplot(as.data.frame(m6A_all), aes(x = condition)) + 
+    geom_bar() +
+    geom_label(aes(label = ..count..), stat = "count", show.legend = F) +
+    labs(y = "Number", x = NULL)
+```
+
+## Metageneprofile
+
+```{r}
+m6A_all <- 
+    metaGeneProfile(m6A_all, "~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")[[1]]
+
+plot_Meta_v2(as.data.frame(m6A_all), group = "condition") +
+    coord_cartesian(xlim = c(0,3),
+                    ylim = c(0,1.2))
+```
+
+
+## assigned_to
+
+```{r}
+m6A_all <- dis_to_SS_v2(m6A_all, hg38, width_bs = 1) %>% suppressWarnings(.)
+m6A_all <- as.data.frame(m6A_all) %>% 
+    mutate(assigned_to = case_when(transcript_id == trans_id_intron ~ "Intron",
+                                   transcript_id == trans_id_exon ~ "Exon",
+                                   T ~ "Not assigned")) %>%
+    makeGRangesFromDataFrame(., keep.extra.columns = T)
+
+p1 <- ggplot(as.data.frame(m6A_all),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar(position = "dodge")  +
+    labs(x = NULL) + 
+    theme(axis.text.x = element_text(angle = 90))
+p2 <- ggplot(as.data.frame(m6A_all),
+       aes(x = condition, fill = assigned_to)) + 
+    geom_bar(position = "fill") +
+    labs(x = NULL, y = "Fraction") + 
+    theme(axis.text.x = element_text(angle = 90))
+p1+p2
+```
+
+## Distance to SS stoi
+
+```{r}
+m6A_all$bin_dis_SS <- cut(m6A_all$dis_SS, breaks = c(0,50,100,200,Inf))
+## make Stoichiometry column for plotting
+m6A_all$Stoichiometry <- case_when(m6A_all$condition == "DMSO" ~ m6A_all$DMSO_mean_stoi,
+                                   m6A_all$condition == "STM" ~ m6A_all$STM_mean_stoi,
+                                   m6A_all$condition == "PlaB" ~ m6A_all$PlaB_mean_stoi,
+                                   m6A_all$condition == "PlaB.STM" ~ m6A_all$PlaB.STM_mean_stoi)
+
+ggplot(as.data.frame(m6A_all[m6A_all$assigned_to != "Not assigned" &
+                                 !is.na(m6A_all$bin_dis_SS),]),
+    aes(x = condition, y = Stoichiometry, fill = bin_dis_SS)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    facet_wrap(~assigned_to) + 
+    labs(x = NULL)
+```
+
+## Distance to SS v2
+
+```{r}
+ggplot(as.data.frame(m6A_all[m6A_all$assigned_to != "Not assigned" &
+                                 !is.na(m6A_all$bin_dis_SS),]),
+    aes(fill = condition, y = Stoichiometry, x = bin_dis_SS)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    facet_wrap(~assigned_to) + 
+    labs(x = NULL)
+```
+
+```{r}
+#| eval: false
+saveRDS(m6A_all, "rds/m6A_all_dFORCE.rds")
+```
+
+
+:::
+
+## DMSO m6A check
+
+:::panel-tabset
+
+## Stoi DMSO vs STM
+
+```{r}
+DMSO_m6A <- m6A_all[m6A_all$condition == "DMSO"]
+
+ggplot(as.data.frame(DMSO_m6A),
+       aes(x = DMSO_mean_stoi, y = STM_mean_stoi)) + 
+    geom_point(alpha = 0.5) +
+    geom_abline(linetype = 2)
+```
+
+## DMSO seqlogo
+
+```{r}
+DMSO_m6A$kmer5 <- getSeq(Hsapiens, DMSO_m6A+2)
+ggseqlogo(as.character(DMSO_m6A$kmer5))
+```
+
+:::
+
+```{r}
+#| eval: false
+## save m6A objects
+saveRDS(m6A_all, "rds/m6A_dFORCE.rds")
+```
+
+
+
+

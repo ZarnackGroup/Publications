@@ -1,0 +1,306 @@
+---
+title: "02 MAJIQ for DC1 and STM"
+date: last-modified
+author: 
+    - name: You Zhou
+      url: https://github.com/Codezy99
+      affiliation: Julius-Maximilians-Universität Würzburg
+      affiliation-url: https://www.uni-wuerzburg.de/
+title-block-banner: true
+format: 
+    html:
+        theme: litera
+        self-contained: true
+        code-fold: true
+        toc: true
+        number-sections: true
+        anchor-sections: true
+    pdf:
+        toc: true
+        number-sections: true
+        self-contained: true
+execute:
+  echo: true
+  error: false
+  warning: false
+editor: 
+  markdown: 
+    wrap: 100
+---
+
+```{r}
+#| echo: false
+## library loading
+library(ggplot2)
+library(tidyverse)
+library(ggExtra)
+library(openxlsx)
+library(knitr)
+library(GenomicFeatures)
+library(GenomicRanges)
+library(gridExtra)
+library(stringr)
+library(Biostrings)
+library(ggseqlogo)
+library(DESeq2)
+library(RColorBrewer)
+library(UpSetR)
+library(cliProfiler)
+library(rtracklayer)
+library(Rsamtools)
+library(ggpointdensity)
+library(readxl)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(forcats)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggsignif)
+library(tidyplots)
+library(gt)
+library("BSgenome.Hsapiens.UCSC.hg38")
+library("BSgenome.Mmusculus.UCSC.mm10")
+## My functions and colors
+source("/Users/codezy/Desktop/Project/homemade_functions/Function_collection.R")
+
+DRACH_color    <- "#FF7F00"
+nonDRACH_color <- "#4DAF4A"
+CDS_color      <- "#ff8c69"
+UTR3_color     <- "#377EB8"
+YTHDF2_color   <- "#FFED6F"
+m6A_color      <- "#737373" # brewer.pal(9, "Greys")[6]
+down_color     <- "#8DD3C7"
+GGAC_color     <- "#8C96C6" # brewer.pal(9, "BuPu")[6]
+WT_color       <- "#FEE08B"
+STM_color      <- "#006837"
+## To make sure the number is in 150000000 format instead of 1.5e+08
+options(scipen = 999)
+
+## set theme skin
+font_szie <- 9
+linesize <- 1
+theme_set(theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      axis.text=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.x=element_text(size = font_szie, face="bold", color = "black"),
+      axis.title.y=element_text(size = font_szie, face="bold", angle = 90, color = "black"),
+      plot.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.text = element_text(size = font_szie, face="bold", color = "black"),
+      legend.title = element_text(size = font_szie, face="bold", color = "black"),
+      legend.position = "bottom",
+      legend.direction="horizontal",
+      axis.line = element_line(colour = "black"),
+      panel.grid.major = element_line(color = "lightgrey"),
+      axis.ticks.x = element_line(color = "black"),
+      axis.ticks.y = element_line(color = "black")))
+
+update_geom_defaults("bar",   list(fill = m6A_color))
+update_geom_defaults("boxplot",   list(fill = m6A_color, outlier.shape = NA))
+update_geom_defaults("col",   list(fill = m6A_color))
+update_geom_defaults("vline",   list(color = "#993404", size = linesize))
+update_geom_defaults("hline",   list(color = "#993404", size = linesize))
+update_geom_defaults("abline",   list(color = "#993404", size = linesize))
+
+scale_fill_discrete <- function(...) {
+   scale_fill_manual(..., values = brewer.pal(9, "Set1"))
+} 
+scale_color_discrete <- function(...) {
+    scale_color_manual(..., values = brewer.pal(9, "Set1"))
+}
+
+basemean <- 10
+pvalue <- 0.05
+hg38 <- import.gff3("~/Desktop/Data/Annotation/Human/gencode.v45.primary_assembly.annotation.gff3")
+```
+
+# Introduction
+In this report, I will use the MAJIQ to systematically investigate the effect of STM and YTHDC1 KD 
+to alternative splicing (AS).
+
+---
+
+# Data process and basic status
+The version of MAJIQ that I used is v2.4. The example code that I used is as follow:
+
+```ruby
+## build majiq ref
+majiq build /home/yzhou/annotation/hg38_v45/gencode.v45.primary_assembly.basic.annotation.gff3 -c /home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq.config.file -j 10 --minreads 10 --min-denovo 15 -o /home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq
+
+## Majiq delta psi
+path="/home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq/"
+## STM
+majiq deltapsi -grp1 "${path}imb_koenig_2024_17_01_siControl_DMSO_01.cutadapt.majiq" "${path}imb_koenig_2024_17_02_siControl_DMSO_02.cutadapt.majiq" "${path}imb_koenig_2024_17_04_siControl_DMSO_04.cutadapt.majiq" -grp2 "${path}imb_koenig_2024_17_05_siControl_STM2457_01.cutadapt.majiq" "${path}imb_koenig_2024_17_06_siControl_STM2457_02.cutadapt.majiq" "${path}imb_koenig_2024_17_07_siControl_STM2457_03.cutadapt.majiq"  -j 10 --minread 25 --output-type all -o /home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq/psi -n DMSO STM
+
+## modulize
+for i in *.voila;
+do voila modulize /home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq/splicegraph.sql $i -d /home/yzhou/Data/RNAseq/HEK_DC1_SRZSF7_DDX6/imb_koenig_2024_17_hochkraft_mRNA_HEK_YTHDC1_SRSF7_DDX6_STM/bam/majiq/voila -j 10 --probability-changing-threshold 0.9 --decomplexify-psi-threshold 0.02 --changing-between-group-dpsi 0.05 --show-all;
+done
+```
+
+
+```{r}
+## functions for majiq
+majiq_read <- function(path_majiq, prob_threshold = 0.9){
+    ## select non-Putative events and non-summary
+    files_majiq <- list.files(path_majiq, pattern = ".tsv") %>% .[!grepl("p_", .)] %>%
+        .[!. %in% c("heatmap.tsv", "other.tsv", "summary.tsv", 
+                    "junctions.tsv", "orphan_junction.tsv")]
+    
+    ## read all files in a list
+    l <- list()
+    for (i in seq_len(length(files_majiq))) {
+        l[[i]] <- read.table(paste0(path_majiq, files_majiq[[i]]), 
+                             sep = "\t", header = T)
+        names(l)[[i]] <- gsub(".tsv", "", files_majiq[[i]])
+        col_filter <- colnames(l[[i]])[
+            grep("_probability_changing", colnames(l[[i]]))]
+        l[[i]]$regulation <- ifelse(l[[i]][,col_filter] > prob_threshold, "Regulated", "Not change")
+        ## remove the NAs row
+        l[[i]] <- l[[i]][!is.na(l[[i]]$regulation),]
+        l[[i]]$AS_id <- paste0(l[[i]]$gene_id, "/", l[[i]]$event_id, "/",
+                               l[[i]]$junction_name, "/", l[[i]]$junction_coord)
+    }    
+    ## return the list
+        return(l)
+}
+## keep the event with highest probability for change for each event_id
+majiq_sum <- function(majiq_out){
+    for (i in seq_len(length(majiq_out))) {
+        col_filter <- colnames(majiq_out[[i]])[
+            grep("_probability_changing", colnames(majiq_out[[i]]))]
+        
+        majiq_out[[i]] <- majiq_out[[i]] %>% group_by(event_id) %>% 
+             arrange(across(all_of(col_filter), ~ - .x), .by_group = TRUE) %>%
+            filter(row_number() == 1)
+    }
+    return(majiq_out)
+}
+
+
+majiq_filtering <- function(majiq_list, prob_threshold = 0.9, median_psi = 0.05){
+    for (i in seq_len(length(majiq_list))) {
+        ## filtering for probability
+        col_filter <- colnames(majiq_list[[i]])[
+            grep("_probability_changing", colnames(majiq_list[[i]]))]
+        majiq_list[[i]] <- majiq_list[[i]] %>% 
+            filter(if_all(all_of(col_filter), ~ .x > prob_threshold))
+        ## filtering for psi
+        psi_cols <- grep("_median_psi$", colnames(majiq_list[[i]]), value = TRUE)
+        majiq_list[[i]] <- majiq_list[[i]] %>%
+            filter(if_any(all_of(psi_cols), ~ .x > median_psi))
+    }
+    return(majiq_list)
+}
+```
+
+```{r}
+## read all data in a list
+path_tmp <- "~/Desktop/Data/Julian_lab/Peter/RNAseq/DC1_DDX6_SRSF7/majiq/"
+file_tmp <- list.files(path_tmp)
+
+majiq_list <- list()
+for (i in 1:length(file_tmp)) {
+    majiq_list[[i]] <- majiq_read(path_majiq = paste0(path_tmp, file_tmp[[i]], "/"),
+                                  prob_threshold = 0.9)
+    names(majiq_list)[[i]] <- gsub(".deltapsi_modu", "", file_tmp)[[i]]
+}
+
+majiq_summary <- lapply(majiq_list, majiq_sum)
+```
+
+
+```{r}
+l <- list()
+for (i in seq_len(length(majiq_summary))) {
+    df <- data.frame(Var1 = "A", Freq = 0, AS = "A")
+    for (j in seq_len(length(majiq_summary[[i]]))) {
+        tmp <- majiq_summary[[i]][[j]]
+        df_2 <- as.data.frame(table(tmp$regulation))
+        df_2$AS <- names(majiq_summary[[i]])[[j]]
+        df <- rbind(df, df_2)
+    }
+    df <- df[-1,]
+    l[[i]] <- ggplot(df, aes(x = AS, y = Freq, fill = Var1, label = Freq)) + 
+        geom_col(position = position_dodge()) + 
+        geom_label(position = position_dodge(width = 0.9), show.legend = F) +
+        labs(y = "Number", x = NULL, fill = "Regulation") + 
+        theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+}
+```
+
+```{r results='asis'}
+cat(":::panel-tabset", "\n\n")
+for (i in seq_len(length(majiq_summary))) {
+    cat("## ", names(majiq_summary)[[i]], "\n\n")
+           print(l[[i]])
+           cat("\n\n")
+}
+cat(":::", "\n\n")
+```
+
+# STM regulated AS events in DC1 KD condition
+
+As shown, the STM regulated AS event received a big influence on DC1 KD.
+
+```{r}
+majiq_stm <- majiq_list$`DMSO-STM`
+majiq_stm_dc1 <- majiq_list$`DC1_DMSO-DC1_STM`
+
+l <- list()
+for (i in 1:length(majiq_stm)) {
+    ## assign dpsi
+    majiq_stm[[i]]$dpsi_stm_dc1 <- majiq_stm_dc1[[i]]$DC1_STM.DC1_DMSO_median_dpsi[
+        match(majiq_stm[[i]]$AS_id, majiq_stm_dc1[[i]]$AS_id)
+    ]
+    majiq_stm[[i]] <- majiq_stm[[i]][order(majiq_stm[[i]]$regulation),]
+    l[[i]] <- ggplot(majiq_stm[[i]], aes(x = STM.DMSO_median_dpsi, y = dpsi_stm_dc1, 
+                                         color = regulation)) + 
+        geom_point(alpha = 0.5) + 
+        labs(y = "dPSI STM (DC1 KD)", x = "dPSI STM", title = "STM effect") + 
+        geom_abline(linetype = 2) + 
+        stat_cor(show.legend = F)
+}
+```
+
+```{r results='asis'}
+cat(":::panel-tabset", "\n\n")
+for (i in seq_len(length(majiq_stm))) {
+    cat("## ", names(majiq_stm)[[i]], "\n\n")
+           print(l[[i]])
+           cat("\n\n")
+}
+cat(":::", "\n\n")
+```
+
+# DC1 KD regulated AS events in STM condition
+
+```{r}
+majiq_dc1 <- majiq_list$`DMSO-DC1_DMSO`
+majiq_dc1_stm <- majiq_list$`STM-DC1_STM`
+
+l <- list()
+for (i in 1:length(majiq_dc1)) {
+    ## assign dpsi
+    majiq_dc1[[i]]$dpsi_dc1_stm <- majiq_dc1_stm[[i]]$DC1_STM.STM_median_dpsi[
+        match(majiq_dc1[[i]]$AS_id, majiq_dc1_stm[[i]]$AS_id)
+    ]
+    majiq_dc1[[i]] <- majiq_dc1[[i]][order(majiq_dc1[[i]]$regulation),]
+    l[[i]] <- ggplot(majiq_dc1[[i]], aes(x = DC1_DMSO.DMSO_median_dpsi, y = dpsi_dc1_stm, 
+                                         color = regulation)) + 
+        geom_point(alpha = 0.5) + 
+        labs(y = "dPSI DC1 KD (STM)", x = "dPSI DC1 KD", title = "YTHDC1 KD effect") + 
+        geom_abline(linetype = 2) + 
+        stat_cor(show.legend = F)
+}
+```
+
+```{r results='asis'}
+cat(":::panel-tabset", "\n\n")
+for (i in seq_len(length(majiq_dc1))) {
+    cat("## ", names(majiq_dc1)[[i]], "\n\n")
+           print(l[[i]])
+           cat("\n\n")
+}
+cat(":::", "\n\n")
+```
